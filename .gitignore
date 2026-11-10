@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+*.db
+*.db-shm
+*.db-wal
+.beings-growth.lock
+reports/
+data/
+.env
+.env.*
+*.pem
+*.key
+artifacts/
+dist/
+macos/Beings Growth.app/Contents/MacOS/
+macos/Beings Growth.app/Contents/Resources/
+macos/Beings Growth.app/Contents/_CodeSignature/
+.DS_Store
+.tmp-scan-tests.*/

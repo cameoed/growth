@@ -1,0 +1,35 @@
+[Unit]
+Description=Beings Growth private prospect intelligence
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/beings-growth/data/leads.db
+
+[Service]
+Type=simple
+User=beings-growth
+Group=beings-growth
+WorkingDirectory=/opt/beings-growth
+Environment=BEINGS_LEADS_HOST=127.0.0.1
+Environment=BEINGS_LEADS_PORT=8787
+Environment=BEINGS_LEADS_DB=/opt/beings-growth/data/leads.db
+Environment=BEINGS_LEADS_FILE_LOG=1
+Environment=PYTHONUNBUFFERED=1
+Environment=LD_LIBRARY_PATH=/opt/beings-growth/lib
+Environment=TLDEXTRACT_CACHE=/opt/beings-growth/data/tldextract
+ExecStartPre=/opt/beings-growth/.venv/bin/python -c "import sqlite3; assert sqlite3.sqlite_version == '3.53.4'"
+ExecStart=/opt/beings-growth/.venv/bin/beings-dashboard
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=180
+KillMode=mixed
+UMask=0077
+RuntimeDirectory=beings-growth
+RuntimeDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/beings-growth
+
+[Install]
+WantedBy=multi-user.target

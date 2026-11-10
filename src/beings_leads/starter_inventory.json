@@ -1,0 +1,472 @@
+[
+  {
+    "hostname": "google.com",
+    "observed_at": "2026-11-08T21:41:17.805440Z",
+    "fetch_outcome": "live",
+    "live": true,
+    "final_url": "https://www.google.com/",
+    "canonical_host": "google.com",
+    "status_code": 200,
+    "title": "Google",
+    "text_excerpt": "Google publishes product announcements and advertising guidance. Its marketing team describes creative production, campaign localization, and human review.",
+    "content_hash": "ab126c45afbc74d81993e97fb2f185311f3a27e6ed89d1f272f0f591f4128c71",
+    "language": {
+      "detected_language": "en",
+      "english_presentation": true,
+      "confidence": "high",
+      "reason": "The page declares English presentation",
+      "declared_language": "en",
+      "analyzed_characters": 9560,
+      "latin_character_ratio": 0.9941
+    },
+    "pages": [
+      {
+        "url": "https://www.google.com/",
+        "status_code": 200,
+        "title": "Google",
+        "content_hash": "ab126c45afbc74d81993e97fb2f185311f3a27e6ed89d1f272f0f591f4128c71",
+        "language": {
+          "detected_language": "en",
+          "english_presentation": true,
+          "confidence": "high",
+          "reason": "The page declares English presentation",
+          "declared_language": "en",
+          "analyzed_characters": 233,
+          "latin_character_ratio": 1.0
+        }
+      },
+      {
+        "url": "https://blog.google/about/",
+        "status_code": 200,
+        "title": "About News from Google - Official Google Blog",
+        "content_hash": "8eb8dc3c6732763eee4865692e1bf770317841b673212fe043b65543a033731e",
+        "canonical_url": "https://blog.google/about/",
+        "language": {
+          "detected_language": "en",
+          "english_presentation": true,
+          "confidence": "high",
+          "reason": "The page declares English presentation",
+          "declared_language": "en-us",
+          "analyzed_characters": 6855,
+          "latin_character_ratio": 0.9793
+        }
+      },
+      {
+        "url": "https://business.google.com/us/support/schedule-appointment/",
+        "status_code": 200,
+        "title": "Schedule a call with an Ads specialist",
+        "content_hash": "4cf3b77f04ba975b110ebd776f8f6e8d665ec00f77705c8bced57a76276a52c0",
+        "canonical_url": "https://business.google.com/us/support/schedule-appointment/",
+        "language": {
+          "detected_language": "en",
+          "english_presentation": true,
+          "confidence": "high",
+          "reason": "The page declares English presentation",
+          "declared_language": "en",
+          "analyzed_characters": 10828,
+          "latin_character_ratio": 0.9876
+        }
+      },
+      {
+        "url": "https://business.google.com/aunz/think/ai-excellence/lorraine-twohill-perspective-ai-and-creativity/",
+        "status_code": 200,
+        "title": "Our CMO’s perspective on AI and creativity - Think with Google AU & NZ",
+        "content_hash": "7055ad28471fe9003b94800ed2af1a4a464b9bcc4933d91393921ec81977fc14",
+        "canonical_url": "https://business.google.com/aunz/think/ai-excellence/lorraine-twohill-perspective-ai-and-creativity/",
+        "language": {
+          "detected_language": "en",
+          "english_presentation": true,
+          "confidence": "high",
+          "reason": "The page declares English presentation",
+          "declared_language": "en",
+          "analyzed_characters": 9560,
+          "latin_character_ratio": 0.9941
+        }
+      },
+      {
+        "url": "https://cloud.google.com/contact",
+        "status_code": 200,
+        "title": "Contact Sales | Google Cloud",
+        "content_hash": "cc962d699c7e4574fc160e2ddef7ff9bba2960c0e4379f93355a81704ea9e6c1",
+        "canonical_url": "https://cloud.google.com/contact",
+        "language": {
+          "detected_language": "en",
+          "english_presentation": true,
+          "confidence": "high",
+          "reason": "The page declares English presentation",
+          "declared_language": "en-US",
+          "analyzed_characters": 16699,
+          "latin_character_ratio": 1.0
+        }
+      }
+    ],
+    "contacts": {
+      "emails": [
+        {
+          "address": "press@google.com",
+          "source_url": "https://blog.google/about/",
+          "method": "visible_text",
+          "purpose": "press",
+          "confidence": "high",
+          "domain_matches_site": true,
+          "observed_at": "2026-11-08T21:41:17.216794Z"
+        }
+      ],
+      "people": [
+        {
+          "name": "Lorraine Twohill",
+          "role": "Chief Marketing Officer",
+          "source_url": "https://business.google.com/aunz/think/ai-excellence/lorraine-twohill-perspective-ai-and-creativity/",
+          "method": "semantic_team_card",
+          "confidence": "high",
+          "observed_at": "2026-11-08T21:41:17.585271Z"
+        },
+        {
+          "name": "Sundar Pichai",
+          "role": "CEO of Alphabet and Google",
+          "source_url": "https://blog.google/about/",
+          "method": "semantic_team_card",
+          "confidence": "high",
+          "observed_at": "2026-11-08T21:41:17.216794Z"
+        }
+      ],
+      "contact_pages_checked": [
+        "https://cloud.google.com/contact",
+        "https://business.google.com/us/support/schedule-appointment/"
+      ],
+      "contact_forms": [
+        "https://business.google.com/us/support/schedule-appointment/"
+      ]
+    },
+    "contact_urls": [
+      "https://cloud.google.com/contact",
+      "https://business.google.com/us/support/schedule-appointment/"
+    ],
+    "evidence_urls": [
+      "https://www.google.com/",
+      "https://blog.google/about/",
+      "https://business.google.com/us/support/schedule-appointment/",
+      "https://business.google.com/aunz/think/ai-excellence/lorraine-twohill-perspective-ai-and-creativity/",
+      "https://cloud.google.com/contact"
+    ],
+    "signals": {
+      "localization": [
+        "multi_market: across 150 countries | And we use AI to translate ad copy and deploy campaigns across 150 countries. | source=https://business.google.com/aunz/think/ai-excellence/lorraine-twohill-perspective-ai-and-creativity/"
+      ],
+      "ai_workflow": [
+        "ai_enabled_workflow: we use ai | And we use AI to translate ad copy and deploy campaigns across 150 countries. | source=https://business.google.com/aunz/think/ai-excellence/lorraine-twohill-perspective-ai-and-creativity/",
+        "ai_enabled_workflow: we use ai | At Google, we use AI to generate several versions of an ad in the time it would have taken to create just one in the past. | source=https://business.google.com/aunz/think/ai-excellence/lorraine-twohill-perspective-ai-and-creativity/",
+        "ai_enabled_workflow: we use ai | When we use AI to translate ad copy, a real person reviews every single piece before it goes live. | source=https://business.google.com/aunz/think/ai-excellence/lorraine-twohill-perspective-ai-and-creativity/",
+        "generative_ai: generative ai | Identifying a specific pain point is one way companies get started, whether it’s an e-commerce retailer using generative AI to write product descriptions at scale or a graphic design platform that makes video creation faster with AI. | source=https://business.google.com/aunz/think/ai-excellence/lorraine-twohill-perspective-ai-and-creativity/"
+      ],
+      "paid_distribution": [
+        "google ads"
+      ],
+      "creative_demand": [
+        "campaign"
+      ]
+    }
+  },
+  {
+    "hostname": "youtube.com",
+    "observed_at": "2026-11-08T21:41:18.135649Z",
+    "fetch_outcome": "live",
+    "live": true,
+    "final_url": "https://www.youtube.com/",
+    "canonical_host": "youtube.com",
+    "status_code": 200,
+    "title": "YouTube",
+    "text_excerpt": "YouTube operates a video platform with advertising, subscription products, and creator tools. Its product announcements cover creation, monetization, and viewing.",
+    "content_hash": "b04e5681433e95d634c13989dc36c1abc8ad36525c425b9efbdd36b7f8e52cd8",
+    "language": {
+      "detected_language": "en",
+      "english_presentation": true,
+      "confidence": "high",
+      "reason": "The page declares English presentation",
+      "declared_language": "en-us",
+      "analyzed_characters": 6168,
+      "latin_character_ratio": 0.9981
+    },
+    "pages": [
+      {
+        "url": "https://www.youtube.com/",
+        "status_code": 200,
+        "title": "YouTube",
+        "content_hash": "b04e5681433e95d634c13989dc36c1abc8ad36525c425b9efbdd36b7f8e52cd8",
+        "canonical_url": "https://www.youtube.com/",
+        "language": {
+          "detected_language": "en",
+          "english_presentation": true,
+          "confidence": "high",
+          "reason": "The page declares English presentation",
+          "declared_language": "en",
+          "analyzed_characters": 247,
+          "latin_character_ratio": 1.0
+        }
+      },
+      {
+        "url": "https://www.youtube.com/t/contact_us/",
+        "status_code": 200,
+        "title": "Contact Us",
+        "content_hash": "2a8dc244add436603282232c742e81ee34ae866bc8c92b44ab635d89e93d0f2b",
+        "language": {
+          "detected_language": "en",
+          "english_presentation": true,
+          "confidence": "high",
+          "reason": "The page declares English presentation",
+          "declared_language": "en",
+          "analyzed_characters": 1862,
+          "latin_character_ratio": 1.0
+        }
+      },
+      {
+        "url": "https://research.youtube.com/",
+        "status_code": 200,
+        "title": "YouTube Research - Home",
+        "content_hash": "54716e2d2f9d156218f53b436d4484f3f3e627287c12766a7da6d572f4989859",
+        "canonical_url": "https://research.youtube/",
+        "language": {
+          "detected_language": "en",
+          "english_presentation": true,
+          "confidence": "high",
+          "reason": "The page declares English presentation",
+          "declared_language": "en-US",
+          "analyzed_characters": 1568,
+          "latin_character_ratio": 1.0
+        }
+      },
+      {
+        "url": "https://blog.youtube/author/neal-mohan/",
+        "status_code": 200,
+        "title": "Neal Mohan | YouTube Blog",
+        "content_hash": "747ac873b826ee92c451bd1764ec125633ad08db345695e431e2397ba42f8c32",
+        "canonical_url": "https://blog.youtube/author/neal-mohan/",
+        "language": {
+          "detected_language": "en",
+          "english_presentation": true,
+          "confidence": "high",
+          "reason": "The page declares English presentation",
+          "declared_language": "en-us",
+          "analyzed_characters": 3344,
+          "latin_character_ratio": 0.9964
+        }
+      },
+      {
+        "url": "https://blog.youtube/news-and-events/innovation-youtube-era-made-on-viewers-creators/",
+        "status_code": 200,
+        "title": "Made On YouTube 2026: All Announcements & New Features - YouTube Blog",
+        "content_hash": "c16ee70adda1e2d30ffaf3c071eac0252a551ea87cd0fc060b86aaec0a3daf42",
+        "canonical_url": "https://blog.youtube/news-and-events/innovation-youtube-era-made-on-viewers-creators/",
+        "language": {
+          "detected_language": "en",
+          "english_presentation": true,
+          "confidence": "high",
+          "reason": "The page declares English presentation",
+          "declared_language": "en-us",
+          "analyzed_characters": 6168,
+          "latin_character_ratio": 0.9981
+        }
+      }
+    ],
+    "contacts": {
+      "emails": [
+        {
+          "address": "press@google.com",
+          "source_url": "https://research.youtube.com/",
+          "method": "visible_text",
+          "purpose": "press",
+          "confidence": "high",
+          "observed_at": "2026-11-08T21:41:17.491904Z"
+        }
+      ],
+      "people": [
+        {
+          "name": "Neal Mohan",
+          "role": "Chief Executive Officer",
+          "source_url": "https://blog.youtube/author/neal-mohan/",
+          "method": "semantic_team_card",
+          "confidence": "high",
+          "observed_at": "2026-11-08T21:41:16.254693Z"
+        }
+      ],
+      "contact_pages_checked": [
+        "https://www.youtube.com/t/contact_us/"
+      ]
+    },
+    "contact_urls": [
+      "https://www.youtube.com/t/contact_us/"
+    ],
+    "evidence_urls": [
+      "https://www.youtube.com/",
+      "https://www.youtube.com/t/contact_us/",
+      "https://research.youtube.com/",
+      "https://blog.youtube/author/neal-mohan/",
+      "https://blog.youtube/news-and-events/innovation-youtube-era-made-on-viewers-creators/"
+    ],
+    "signals": {
+      "creative_formats": [
+        "video: video production | We’re introducing new tools to ease video production and publishing. | source=https://blog.youtube/news-and-events/innovation-youtube-era-made-on-viewers-creators/"
+      ],
+      "creator_education": [
+        "academy",
+        "community",
+        "enroll"
+      ],
+      "creative_demand": [
+        "video production"
+      ]
+    }
+  },
+  {
+    "hostname": "bloomberg.com",
+    "observed_at": "2026-11-08T21:41:17.010662Z",
+    "fetch_outcome": "live",
+    "direct_fetch_error": "Homepage HTTP 403; public Professional Services page available",
+    "live": true,
+    "final_url": "https://professional.bloomberg.com/contact-menu/",
+    "canonical_host": "bloomberg.com",
+    "status_code": 200,
+    "title": "Bloomberg",
+    "text_excerpt": "Bloomberg operates a financial data subscription business and a media business. Bloomberg Media Studios produces a recurring executive interview series and publishes a business inquiries inbox.",
+    "content_hash": "4b8524700a5f6694c0db554bd9b09f67f72a9efc312165b564e9fdc7c80ef02a",
+    "language": {
+      "detected_language": "en",
+      "english_presentation": true,
+      "confidence": "high",
+      "reason": "The page declares English presentation",
+      "declared_language": "en-US",
+      "analyzed_characters": 9720,
+      "latin_character_ratio": 1.0
+    },
+    "pages": [
+      {
+        "url": "https://professional.bloomberg.com/contact-menu/",
+        "status_code": 200,
+        "title": "Contact Menu | Bloomberg Professional Services",
+        "content_hash": "4b8524700a5f6694c0db554bd9b09f67f72a9efc312165b564e9fdc7c80ef02a",
+        "canonical_url": "https://professional.bloomberg.com/contact-menu/",
+        "language": {
+          "detected_language": "en",
+          "english_presentation": true,
+          "confidence": "high",
+          "reason": "The page declares English presentation",
+          "declared_language": "en-US",
+          "analyzed_characters": 5132,
+          "latin_character_ratio": 1.0
+        }
+      },
+      {
+        "url": "https://go.bloomberg.com/rsvp/invite/responsible-ai-a-bedrock-for-a-thriving-tech-and-financial-industry/",
+        "status_code": 200,
+        "title": "Responsible AI: A Bedrock for a Thriving Tech and Financial Industry | Bloomberg Events",
+        "content_hash": "ef98c473ecb6b7f30e56e8445daf208795fd30117afa25522edcd1267a1840a9",
+        "canonical_url": "https://go.bloomberg.com/rsvp/invite/responsible-ai-a-bedrock-for-a-thriving-tech-and-financial-industry/",
+        "language": {
+          "detected_language": "en",
+          "english_presentation": true,
+          "confidence": "high",
+          "reason": "The page declares English presentation",
+          "declared_language": "en-US",
+          "analyzed_characters": 9372,
+          "latin_character_ratio": 1.0
+        }
+      },
+      {
+        "url": "https://sponsored.bloomberg.com/hub/the-executive-table",
+        "status_code": 200,
+        "title": "The Executive Table",
+        "content_hash": "2409902905c028ad4474eae88eb7ac01cece012f49f4d943b0d6d2ee6ce795f9",
+        "language": {
+          "detected_language": "en",
+          "english_presentation": true,
+          "confidence": "high",
+          "reason": "The page declares English presentation",
+          "declared_language": "en-us",
+          "analyzed_characters": 4320,
+          "latin_character_ratio": 1.0
+        }
+      },
+      {
+        "url": "https://professional.bloomberg.com/request-demo/",
+        "status_code": 200,
+        "title": "Request a Demo | Bloomberg Professional Services",
+        "content_hash": "e2428b3df2b35bce9f8f22fd093bf6f0a80514ff95e89441ebebade1e42ae7fc",
+        "canonical_url": "https://professional.bloomberg.com/request-demo/",
+        "language": {
+          "detected_language": "en",
+          "english_presentation": true,
+          "confidence": "high",
+          "reason": "The page declares English presentation",
+          "declared_language": "en-US",
+          "analyzed_characters": 9720,
+          "latin_character_ratio": 1.0
+        }
+      }
+    ],
+    "contacts": {
+      "emails": [
+        {
+          "address": "bbg_media@bloomberg.net",
+          "source_url": "https://sponsored.bloomberg.com/hub/the-executive-table",
+          "method": "visible_text",
+          "purpose": "marketing",
+          "confidence": "high",
+          "outreach_eligible": true,
+          "observed_at": "2026-11-08T21:41:17.010662Z"
+        },
+        {
+          "address": "inquiry1@bloomberg.net",
+          "source_url": "https://www.bloomberg.com/company/press-contacts/",
+          "method": "visible_text",
+          "purpose": "press",
+          "confidence": "high",
+          "observed_at": "2026-11-08T21:41:17.010662Z"
+        }
+      ],
+      "phones": [
+        {
+          "number": "+1 212 318 2000",
+          "dial_number": "+12123182000",
+          "source_url": "https://professional.bloomberg.com/contact-menu/",
+          "method": "tel",
+          "purpose": "general",
+          "confidence": "high",
+          "observed_at": "2026-11-08T21:41:16.363432Z"
+        }
+      ],
+      "people": [
+        {
+          "name": "Vlad Kliatchko",
+          "role": "CEO, Bloomberg LP",
+          "source_url": "https://go.bloomberg.com/rsvp/invite/responsible-ai-a-bedrock-for-a-thriving-tech-and-financial-industry/",
+          "method": "semantic_team_card",
+          "confidence": "high",
+          "observed_at": "2026-11-08T21:41:16.077952Z"
+        }
+      ],
+      "contact_pages_checked": [
+        "https://professional.bloomberg.com/request-demo/",
+        "https://professional.bloomberg.com/contact-menu/"
+      ],
+      "contact_forms": [
+        "https://professional.bloomberg.com/request-demo/"
+      ]
+    },
+    "contact_urls": [
+      "https://professional.bloomberg.com/request-demo/",
+      "https://professional.bloomberg.com/contact-menu/"
+    ],
+    "evidence_urls": [
+      "https://professional.bloomberg.com/contact-menu/",
+      "https://go.bloomberg.com/rsvp/invite/responsible-ai-a-bedrock-for-a-thriving-tech-and-financial-industry/",
+      "https://sponsored.bloomberg.com/hub/the-executive-table",
+      "https://professional.bloomberg.com/request-demo/",
+      "https://www.bloomberg.com/company/press-contacts/"
+    ],
+    "signals": {
+      "recurring": [
+        "subscription"
+      ]
+    }
+  }
+]

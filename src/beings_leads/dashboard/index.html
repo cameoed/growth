@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Beings Growth — local prospect intelligence for Beings.org" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#101216" />
+    <script>
+      try {
+        if (localStorage.getItem("beings-interface-theme") === "light") {
+          document.documentElement.dataset.theme = "light";
+        }
+      } catch {
+        // Storage can be unavailable. The default appearance is dark.
+      }
+    </script>
+    <title>Beings Growth</title>
+    <link rel="icon" type="image/png" href="/assets/beings-growth-logo.png?v=20261009-blue-star" />
+    <link rel="apple-touch-icon" href="/assets/beings-growth-logo.png?v=20261009-blue-star" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20261110-header-spinner" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#sales" aria-label="Beings Growth home">
+          <span class="brand-mark" aria-hidden="true">
+            <img class="brand-logo" src="/assets/beings-growth-logo.png?v=20261009-blue-star" alt="" />
+          </span>
+          <span><strong>Beings</strong><small>Growth</small></span>
+        </a>
+        <nav class="nav" aria-label="Primary navigation">
+          <button class="nav-item active" data-view="sales"><span>Companies</span><kbd>1</kbd></button>
+          <button class="nav-item" data-view="smart_scan"><span>Scan</span><kbd>2</kbd></button>
+          <button class="nav-item" data-view="prospects"><span>Prospects</span><kbd>3</kbd></button>
+          <button class="nav-item" data-view="spend"><span>Spend</span><kbd>4</kbd></button>
+          <div class="sidebar-foot">
+            <span class="scan-state" id="scan-state" hidden aria-live="polite"></span>
+            <button class="nav-item" data-view="settings"><span>Settings</span><i id="scan-setup-indicator" aria-hidden="true" hidden></i><kbd>5</kbd></button>
+            <a class="nav-item sidebar-website" href="https://beings.org/" target="_blank" rel="noopener noreferrer" aria-label="Beings.org" title="Open Beings.org in browser"><span>Beings.org</span><kbd>6</kbd></a>
+          </div>
+        </nav>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="topbar-title"><h1 id="page-title">Companies</h1></div>
+          <div class="topbar-search-group">
+            <form class="topbar-search" id="page-search-form" role="search" hidden>
+              <label for="page-search"><span class="sr-only">Search companies</span><input id="page-search" type="search" placeholder="Search companies" autocomplete="off" /></label>
+              <span class="page-search-status" id="page-search-status" aria-live="polite"></span>
+            </form>
+            <div id="company-loading-banner" role="status" hidden>
+              <span class="loading-indicator"><span class="loading-spinner" aria-hidden="true"></span><span>Loading…</span></span>
+            </div>
+          </div>
+          <div class="topbar-actions">
+            <div class="interface-zoom" role="group" aria-label="Interface zoom">
+              <button type="button" class="icon-button" data-interface-zoom="out" aria-label="Zoom interface out" title="Zoom interface out">−</button>
+              <button type="button" class="icon-button" data-interface-zoom="in" aria-label="Zoom interface in" title="Zoom interface in">+</button>
+            </div>
+            <button type="button" class="icon-button interface-theme" id="interface-theme" aria-label="Light mode" aria-pressed="false">
+              <svg class="theme-sun" aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round">
+                <circle cx="12" cy="12" r="4" />
+                <path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41m0-14.14-1.41 1.41M6.34 17.66l-1.41 1.41" />
+              </svg>
+              <svg class="theme-moon" aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round">
+                <path d="M20.9 13.35A9 9 0 0 1 10.65 3.1 9 9 0 1 0 20.9 13.35Z" />
+              </svg>
+            </button>
+            <button type="button" class="icon-button interface-refresh" id="refresh-app" aria-label="Refresh the entire app" title="Refresh the entire app">
+              <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20 4v6h-6M20 10a8 8 0 1 0-.6 6" />
+              </svg>
+            </button>
+            <div id="engine-missions"></div>
+          </div>
+        </header>
+
+        <dialog id="engine-mission-dialog" class="modal engine-mission-dialog" aria-labelledby="engine-mission-dialog-title"></dialog>
+
+        <section id="scan-overview" class="scan-overview" aria-label="Scan status" aria-live="polite" hidden></section>
+
+        <section class="view" id="view-overview" aria-labelledby="page-title">
+          <section class="target-coverage-summary" aria-label="Target intelligence coverage">
+            <div class="target-coverage-banner" id="target-coverage" aria-live="polite">
+              <div><span class="coverage-pulse" aria-hidden="true"></span><div><strong id="target-coverage-title">Loading…</strong><small id="target-coverage-copy"></small></div></div>
+            </div>
+            <article class="target-summary-metric"><span>Candidates</span><strong id="metric-target-discovered">—</strong></article>
+            <article class="target-summary-metric"><span>Projected</span><strong id="metric-target-hydrated">—</strong></article>
+            <div class="target-shortfall" id="target-shortfall" role="status">Loading…</div>
+          </section>
+          <div class="target-command-grid">
+            <section class="panel target-command-panel">
+              <div class="panel-head"><h3>Direct buyers</h3></div>
+              <div class="table-wrap"><table class="minimal-target-table"><thead><tr><th>Company</th><th><button class="sort-header" data-target-sort="durable_fit" type="button">Fit</button></th><th><button class="sort-header" data-target-sort="contact_now" type="button">Now</button></th><th><button class="sort-header" data-target-sort="priority" type="button">Priority</button></th><th>Action</th><th><button class="sort-header" data-target-sort="failure_rate" type="button">Fails</button></th><th>Why now</th><th>Contact</th></tr></thead><tbody id="buyer-target-body"><tr><td colspan="8" class="loading-row">Loading…</td></tr></tbody></table></div>
+            </section>
+            <section class="panel target-command-panel">
+              <div class="panel-head"><h3>Agency partners</h3></div>
+              <div class="table-wrap"><table class="minimal-target-table"><thead><tr><th>Company</th><th><button class="sort-header" data-target-sort="durable_fit" type="button">Fit</button></th><th><button class="sort-header" data-target-sort="contact_now" type="button">Now</button></th><th><button class="sort-header" data-target-sort="priority" type="button">Priority</button></th><th>Action</th><th><button class="sort-header" data-target-sort="failure_rate" type="button">Fails</button></th><th>Why now</th><th>Contact</th></tr></thead><tbody id="referral-target-body"><tr><td colspan="8" class="loading-row">Loading…</td></tr></tbody></table></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="view-spend"></section>
+        <section class="view" id="view-smart_scan"></section>
+        <section class="view active" id="view-sales"></section>
+        <section class="view" id="view-accounts"></section>
+        <section class="view" id="view-prospects"></section>
+        <section class="view" id="view-sources"></section>
+        <section class="view" id="view-research"></section>
+        <section class="view" id="view-intelligence"></section>
+        <section class="view" id="view-runs"></section>
+        <section class="view" id="view-settings"></section>
+      </main>
+    </div>
+
+    <dialog class="modal compact" id="source-modal">
+      <form method="dialog" class="modal-card" id="source-form">
+        <header class="modal-head">
+          <h2>Add source</h2>
+          <button type="button" class="icon-button" data-close-dialog="source-modal" aria-label="Close source dialog">×</button>
+        </header>
+        <div class="modal-body">
+          <label class="field"><span>Apex domain</span><input name="apex" required placeholder="platform.example" autocomplete="off" /></label>
+          <label class="field"><span>Category</span><select name="category"><option>Agency</option><option>Ecommerce</option><option>B2B / SaaS</option><option selected>Other</option></select></label>
+          <label class="field"><span>Notes</span><textarea name="notes" rows="3"></textarea></label>
+        </div>
+        <footer class="modal-actions"><button type="button" class="button" data-close-dialog="source-modal">Cancel</button><button type="submit" class="button primary" value="default">Add source</button></footer>
+      </form>
+    </dialog>
+
+    <dialog class="modal compact" id="account-modal">
+      <form method="dialog" class="modal-card" id="account-form">
+        <header class="modal-head"><h2>Add company</h2><button type="button" class="icon-button" data-close-dialog="account-modal" aria-label="Close company dialog">×</button></header>
+        <div class="modal-body form-grid">
+          <label class="field"><span>Company</span><input name="company" required maxlength="200" autocomplete="organization" /></label>
+          <label class="field"><span>Website</span><input name="website" required type="url" placeholder="https://example.com" autocomplete="url" /></label>
+          <label class="field"><span>Cohort</span><input name="cohort" required value="prototype-v1" maxlength="80" /></label>
+          <label class="field"><span>Segment</span><select name="segment" id="new-account-segment"><option value="consumer_brand">Consumer brand</option><option value="consumer_app">Consumer app</option><option value="digital_product">Digital product</option><option value="gaming">Gaming</option><option value="subscription_business">Subscription business</option><option value="saas_ai_adjacency">Warm SaaS / AI adjacency</option><option value="agency_buyer">Agency production buyer</option><option value="agency_referral_partner">Agency referral partner</option><option value="other">Other</option></select></label>
+          <label class="field"><span>Relationship</span><select name="relationship_type" id="new-account-relationship"><option value="buyer">Buyer</option><option value="referral_partner">Referral partner</option></select></label>
+          <label class="field"><span>Lead source</span><select name="lead_source"><option value="past_client">Past client</option><option value="founder_investor_network">Founder / investor network</option><option value="specialist_referral">Specialist referral</option><option value="targeted_outbound" selected>Targeted outbound</option><option value="other">Other</option></select></label>
+          <label class="field form-wide"><span>Referrer / introduction context</span><input name="referrer" maxlength="300" /></label>
+        </div>
+        <footer class="modal-actions"><button type="button" class="button" data-close-dialog="account-modal">Cancel</button><button type="submit" class="button primary" value="default">Add company</button></footer>
+      </form>
+    </dialog>
+
+    <dialog class="modal" id="account-import-modal">
+      <form method="dialog" class="modal-card" id="account-import-form">
+        <header class="modal-head"><h2>Import companies</h2><button type="button" class="icon-button" data-close-dialog="account-import-modal" aria-label="Close import dialog">×</button></header>
+        <div class="modal-body"><label class="field"><span>CSV file</span><input name="file" type="file" accept=".csv,text/csv" required /></label><p class="form-note">Columns: company, website, cohort, relationship_type, segment, lead_source, referrer.</p><div class="import-preview" id="account-import-preview" aria-live="polite"></div></div>
+        <footer class="modal-actions"><button type="button" class="button" data-close-dialog="account-import-modal">Cancel</button><button type="button" class="button" id="preview-account-import">Validate</button><button type="submit" class="button primary" id="commit-account-import" disabled>Import</button></footer>
+      </form>
+    </dialog>
+
+    <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+    <aside class="drawer" id="prospect-drawer" aria-label="Target details" aria-hidden="true">
+      <div id="drawer-content"></div>
+    </aside>
+    <div class="drawer-backdrop" id="account-backdrop" hidden></div>
+    <aside class="account-workspace" id="account-workspace" aria-label="Account workspace" aria-hidden="true">
+      <div id="account-workspace-content"></div>
+    </aside>
+    <div class="toast-region" id="toasts" aria-live="polite"></div>
+    <script type="module" src="/assets/app.js?v=20261110-profile-by-name"></script>
+  </body>
+</html>
