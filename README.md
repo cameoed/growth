@@ -2,6 +2,8 @@
 
 # Beings Growth
 
+![Beings Growth dashboard](docs/beings-growth-dashboard.png)
+
 Discover companies, rank them against your prospecting goals, and find public business contacts.
 
 ## Get started
