@@ -7941,7 +7941,8 @@ class SmartScanManager:
     @measure_operation("microlink_hydration")
     async def _run_microlink_hydration(self) -> None:
         from .microlink_contacts_scan import recent_contact_companies
-        from .microlink_hydration import FEATURES, run_hydration, select_cohort
+        from .microlink_hydration import FEATURES, SCANNER_ID, run_hydration, select_cohort
+        from .sales_engine.ranking import refresh_candidate_rankings
 
         options = MicrolinkHydrationOptions.model_validate(
             self.state.get("microlink_hydration") or {})
@@ -7975,9 +7976,10 @@ class SmartScanManager:
                         detail=f"{result['completed']} companies · {result['requests']} requests")
             self._persist_state()
 
+        run_id = int(self.state["microlink_hydration_run_id"])
+        cohort = self.state.get("_microlink_cohort") or []
         result = await run_hydration(
-            database_path(), int(self.state["microlink_hydration_run_id"]), options,
-            os.environ[MICROLINK_SECRET], self.state.get("_microlink_cohort") or [],
+            database_path(), run_id, options, os.environ[MICROLINK_SECRET], cohort,
             checkpoint=self._checkpoint, progress=progress,
         )
         self.state.update(microlink_hydration_result=result, microlink_hydration_complete=True)
@@ -7986,12 +7988,30 @@ class SmartScanManager:
 
         def finish():
             with LeadStore(database_path(), initialize=False) as store:
-                store.finish_run(int(self.state["microlink_hydration_run_id"]),
-                                 "partial" if result.get("failed") else "complete", result)
-        await self._await_seo_publication(finish)
+                store.finish_run(run_id, "partial" if result.get("failed") else "complete", result)
+                # Failed attempts can change coverage. Reused companies have no
+                # execution for this child and need no scan-owned publication.
+                cohort_ids = json.dumps([company["candidate_id"] for company in cohort])
+                return [row[0] for row in store.connection.execute(
+                    "SELECT DISTINCT cohort.value FROM json_each(?) cohort "
+                    "WHERE EXISTS (SELECT 1 FROM scanner_executions e "
+                    "WHERE e.candidate_id=cohort.value AND e.run_id=? AND e.scanner_id=?) "
+                    "ORDER BY cohort.value",
+                    (cohort_ids, run_id, SCANNER_ID),
+                )]
+
+        def publish(candidate_ids):
+            with LeadStore(database_path(), initialize=False) as store:
+                return refresh_candidate_rankings(store, candidate_ids, reuse_current=True)
+
+        affected = await self._await_seo_publication(finish)
         await self._flush_persistence()
         await self.refresh_error_presentation(limit=1)
-        await self._refresh_paid_scan_rankings()
+        batch_size = SMART_SCAN_RANKING_BATCH_SIZE
+        for start in range(0, len(affected), batch_size):
+            await self._checkpoint()
+            batch = affected[start:start + batch_size]
+            await self._await_seo_publication(partial(publish, batch))
         self._advance_work(1, current="Microlink hydration complete")
         self._persist_state()
 
