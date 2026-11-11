@@ -8,8 +8,23 @@ from beings_leads import ai_source_queries, free_source_scout, source_discovery_
 from beings_leads.ad_intelligence import AdDiscoveryRequest
 from beings_leads.missions import scan_context as context
 from beings_leads.missions.store import create_mission, get_mission, initialize
+from beings_leads.models import SourceSuggestion
 from beings_leads.scan_goal import ScanGoalRequest
 from beings_leads.store import LeadStore
+
+
+def repeatable_source():
+    url = "https://source-directory.com/"
+    return SourceSuggestion(
+        source_kind="repeatable_search",
+        url=url,
+        name="Repeatable search source",
+        category="Ecommerce",
+        discovery_mechanism="Enumerate public sources and resolve official domains.",
+        expected_6k_fit="high",
+        confidence="high",
+        evidence_urls=[url],
+    )
 
 
 @pytest.fixture
@@ -89,7 +104,6 @@ def test_mission_identity_round_trips_with_legacy_default(model, arguments):
 
 
 def test_source_resolver_transmits_complete_context_and_keeps_its_cap(monkeypatch):
-    from test_source_discovery import suggestion
     calls = []
     response = SimpleNamespace(status="completed", output_parsed={"domains": []},
                                model_dump=lambda **_: {"output": []})
@@ -100,7 +114,7 @@ def test_source_resolver_transmits_complete_context_and_keeps_its_cap(monkeypatc
         responses=SimpleNamespace(parse=parse)))
     saved = {"mission_id": "robots", "revision": 4, "search_terms": ["industrial robotics"],
              "criteria": {"employee_count": {"minimum": 500, "weight": 20}}}
-    source_discovery_ai._resolve_sync(suggestion("repeatable_search"), model="mock",
+    source_discovery_ai._resolve_sync(repeatable_source(), model="mock",
                                      max_results=5, max_tool_calls=1, entity_hints=[],
                                      mission_context=saved)
     assert json.loads(calls[0]["input"])["selected_mission"] == saved
@@ -154,7 +168,6 @@ def test_mission_context_api_is_read_only_and_rejects_unknown(mission_store, mon
 
 async def test_resolution_cache_is_shared_for_same_mission_but_not_other_revisions(monkeypatch):
     import httpx
-    from test_source_discovery import suggestion
 
     from beings_leads import source_discovery
 
@@ -175,7 +188,7 @@ async def test_resolution_cache_is_shared_for_same_mission_but_not_other_revisio
     async with httpx.AsyncClient() as client:
         for revision in [1, 1, 2]:
             await source_discovery.discover_source(
-                client, suggestion("repeatable_search"), page_cache=Cache(),
+                client, repeatable_source(), page_cache=Cache(),
                 mission_context={"mission_id": "robots", "revision": revision},
             )
     assert [call["revision"] for call in calls] == [1, 2]

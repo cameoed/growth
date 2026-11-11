@@ -183,7 +183,7 @@ def test_goal_endpoint_sets_draft_without_starting_scan(tmp_path, monkeypatch):
     monkeypatch.setattr(scan_goal, "OpenAI", lambda **kwargs: provider)
     with LeadStore(tmp_path / "test.db"):
         pass
-    api = TestClient(web.app)
+    api = TestClient(web.app, base_url="http://localhost", client=("127.0.0.1", 12345))
     result = api.post("/api/smart-scan/configure", json=request().model_dump())
     assert result.status_code == 200, result.text
     assert result.json()["settings"]["due_company_limit"] == 10
