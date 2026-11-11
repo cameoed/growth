@@ -1384,6 +1384,25 @@ async def crawl_public_source(
     timeout_break = False
     rate_limit_retry_after: datetime | None = None
 
+    def defer_rate_limit(response):
+        nonlocal rate_limit_retry_after
+        now = datetime.now(UTC)
+        retry_at = now + timedelta(minutes=15)
+        retry_header = response.headers.get("retry-after", "").strip()
+        if retry_header:
+            try:
+                requested = (now + timedelta(seconds=int(retry_header))
+                             if retry_header.isdigit()
+                             else parsedate_to_datetime(retry_header).astimezone(UTC))
+                retry_at = max(retry_at, requested)
+            except (ValueError, TypeError, OverflowError):
+                pass
+        rate_limit_retry_after = max(rate_limit_retry_after or retry_at, retry_at)
+        result.warnings.append(
+            f"{urlparse(str(response.url)).hostname}: HTTP 429; source deferred until "
+            f"{rate_limit_retry_after.isoformat()}; remaining pages stay due"
+        )
+
     def report(url):
         if progress is not None:
             progress({"url": url, "fetch_attempts": result.fetch_attempts,
@@ -1487,6 +1506,9 @@ async def crawl_public_source(
             consecutive_timeouts = 0
         except (httpx.HTTPError, OSError, UnsafeTargetError, ValueError) as exc:
             direct_error = exc
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+                defer_rate_limit(exc.response)
+                break
             consecutive_timeouts = (
                 consecutive_timeouts + 1 if isinstance(exc, httpx.TimeoutException) else 0
             )
@@ -1516,18 +1538,8 @@ async def crawl_public_source(
         if response is not None and response.status_code >= 400:
             direct_status = response.status_code
             if direct_status == 429:
-                now = datetime.now(UTC)
-                retry_at = now + timedelta(minutes=15)
-                retry_header = response.headers.get("retry-after", "").strip()
-                if retry_header:
-                    try:
-                        requested = (now + timedelta(seconds=int(retry_header))
-                                     if retry_header.isdigit()
-                                     else parsedate_to_datetime(retry_header).astimezone(UTC))
-                        retry_at = max(retry_at, requested)
-                    except (ValueError, TypeError, OverflowError):
-                        pass
-                rate_limit_retry_after = max(rate_limit_retry_after or retry_at, retry_at)
+                defer_rate_limit(response)
+                break
             if microlink_fallback_eligible(response, None):
                 try:
                     recovered = await rendered_html(str(response.url))
@@ -1645,7 +1657,8 @@ async def crawl_public_source(
             )
             break
 
-    while pdf_queue and result.pdf_files < bounds.max_pdfs and not timeout_break:
+    while (pdf_queue and result.pdf_files < bounds.max_pdfs
+           and not timeout_break and not rate_limit_retry_after):
         url = pdf_queue.popleft()
         if url in seen_pdfs and url in seen:
             continue
@@ -1667,8 +1680,14 @@ async def crawl_public_source(
                 allowed_content_types=("pdf", "octet-stream"),
             )
         except (httpx.HTTPError, OSError, UnsafeTargetError, ValueError) as exc:
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+                defer_rate_limit(exc.response)
+                break
             result.errors.append(f"{url}: {type(exc).__name__}: {exc}"[:2_000])
             continue
+        if response.status_code == 429:
+            defer_rate_limit(response)
+            break
         if response.status_code >= 400:
             result.warnings.append(f"{url}: HTTP {response.status_code}")
             continue
@@ -1728,10 +1747,7 @@ async def crawl_public_source(
     }
     if timeout_break:
         result.coverage["retry_after"] = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
-    if rate_limit_retry_after and any(
-        "HTTP 429" in warning and "recovered rendered HTML" not in warning
-        for warning in result.warnings
-    ):
+    if rate_limit_retry_after:
         result.coverage["retry_after"] = rate_limit_retry_after.isoformat()
     if yield_stop:
         # Allocation backoff is not a new evidence freshness clock. Preserve longer
@@ -1769,6 +1785,7 @@ async def _ai_candidates(
     limits: SourceDiscoveryLimits,
     model: str,
     entity_hints: list[str],
+    mission_context: dict | None = None,
 ) -> tuple[list[DiscoveredHost], int]:
     resolution = await source_discovery_ai.resolve_source_domains(
         suggestion,
@@ -1776,6 +1793,7 @@ async def _ai_candidates(
         max_results=limits.max_results,
         max_tool_calls=limits.max_tool_calls,
         entity_hints=entity_hints,
+        **({"mission_context": mission_context} if mission_context else {}),
     )
     candidates: list[DiscoveredHost] = []
     for item in resolution.domains:
@@ -1804,6 +1822,7 @@ async def discover_source(
     microlink_api_key: str = "",
     page_cache=None,
     progress=None,
+    mission_context: dict | None = None,
 ) -> SourceDiscoveryResult:
     """Execute any SourceSuggestion kind and return auditable, bounded candidates."""
 
@@ -1911,6 +1930,7 @@ async def discover_source(
                 resolution_key = hashlib.sha256(json.dumps([
                     suggestion.model_dump(mode="json"), resolution_model,
                     bounds.max_results, bounds.max_tool_calls, entity_hints,
+                    *([mission_context] if mission_context else []),
                 ], sort_keys=True).encode()).hexdigest()
                 cached_resolution = (await _cache_receipt(
                     page_cache, "get", resolution_key, "ai_resolution",
@@ -1921,6 +1941,7 @@ async def discover_source(
                     ai_candidates, tool_calls = await _ai_candidates(
                         suggestion, limits=bounds, model=resolution_model,
                         entity_hints=entity_hints,
+                        **({"mission_context": mission_context} if mission_context else {}),
                     )
                     if page_cache:
                         await _cache_receipt(page_cache, "put", resolution_key, "ai_resolution", {

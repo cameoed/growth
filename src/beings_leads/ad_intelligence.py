@@ -91,6 +91,7 @@ class AdDiscoveryRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    mission_id: str = Field(default="beings", min_length=1, max_length=100)
     mode: Literal["discover", "hydrate", "both"] = "discover"
     meta_enabled: bool = True
     meta_queries: list[str] = Field(default_factory=list, max_length=20)

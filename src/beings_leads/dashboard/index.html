@@ -18,7 +18,7 @@
     <title>Beings Growth</title>
     <link rel="icon" type="image/png" href="/assets/beings-growth-logo.png?v=20261009-blue-star" />
     <link rel="apple-touch-icon" href="/assets/beings-growth-logo.png?v=20261009-blue-star" />
-    <link rel="stylesheet" href="/assets/styles.css?v=20261110-header-spinner" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20261110-contacts-table" />
   </head>
   <body>
     <div class="app-shell">
@@ -51,7 +51,7 @@
               <span class="page-search-status" id="page-search-status" aria-live="polite"></span>
             </form>
             <div id="company-loading-banner" role="status" hidden>
-              <span class="loading-indicator"><span class="loading-spinner" aria-hidden="true"></span><span>Loading…</span></span>
+              <span class="loading-indicator"><span class="loading-spinner" aria-hidden="true"></span><span class="header-status-label">Loading…</span></span>
             </div>
           </div>
           <div class="topbar-actions">
@@ -109,7 +109,6 @@
         <section class="view" id="view-prospects"></section>
         <section class="view" id="view-sources"></section>
         <section class="view" id="view-research"></section>
-        <section class="view" id="view-intelligence"></section>
         <section class="view" id="view-runs"></section>
         <section class="view" id="view-settings"></section>
       </main>
@@ -118,7 +117,7 @@
     <dialog class="modal compact" id="source-modal">
       <form method="dialog" class="modal-card" id="source-form">
         <header class="modal-head">
-          <h2>Add source</h2>
+          <h2 tabindex="-1" autofocus>Add source</h2>
           <button type="button" class="icon-button" data-close-dialog="source-modal" aria-label="Close source dialog">×</button>
         </header>
         <div class="modal-body">
@@ -132,7 +131,7 @@
 
     <dialog class="modal compact" id="account-modal">
       <form method="dialog" class="modal-card" id="account-form">
-        <header class="modal-head"><h2>Add company</h2><button type="button" class="icon-button" data-close-dialog="account-modal" aria-label="Close company dialog">×</button></header>
+        <header class="modal-head"><h2 tabindex="-1" autofocus>Add company</h2><button type="button" class="icon-button" data-close-dialog="account-modal" aria-label="Close company dialog">×</button></header>
         <div class="modal-body form-grid">
           <label class="field"><span>Company</span><input name="company" required maxlength="200" autocomplete="organization" /></label>
           <label class="field"><span>Website</span><input name="website" required type="url" placeholder="https://example.com" autocomplete="url" /></label>
@@ -148,7 +147,7 @@
 
     <dialog class="modal" id="account-import-modal">
       <form method="dialog" class="modal-card" id="account-import-form">
-        <header class="modal-head"><h2>Import companies</h2><button type="button" class="icon-button" data-close-dialog="account-import-modal" aria-label="Close import dialog">×</button></header>
+        <header class="modal-head"><h2 tabindex="-1" autofocus>Import companies</h2><button type="button" class="icon-button" data-close-dialog="account-import-modal" aria-label="Close import dialog">×</button></header>
         <div class="modal-body"><label class="field"><span>CSV file</span><input name="file" type="file" accept=".csv,text/csv" required /></label><p class="form-note">Columns: company, website, cohort, relationship_type, segment, lead_source, referrer.</p><div class="import-preview" id="account-import-preview" aria-live="polite"></div></div>
         <footer class="modal-actions"><button type="button" class="button" data-close-dialog="account-import-modal">Cancel</button><button type="button" class="button" id="preview-account-import">Validate</button><button type="submit" class="button primary" id="commit-account-import" disabled>Import</button></footer>
       </form>
@@ -163,6 +162,6 @@
       <div id="account-workspace-content"></div>
     </aside>
     <div class="toast-region" id="toasts" aria-live="polite"></div>
-    <script type="module" src="/assets/app.js?v=20261110-profile-by-name"></script>
+    <script type="module" src="/assets/app.js?v=20261110-contacts-table"></script>
   </body>
 </html>

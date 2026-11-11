@@ -25,6 +25,10 @@ The supplied relationship type, source family, and buyer archetypes describe why
 accepted the source and which public members to enumerate. They are discovery context only: do not
 copy those labels onto an organization as facts or use them to infer demand, dissatisfaction with
 an incumbent provider, budget, production pressure, AI permission, or outreach readiness.
+When selected_mission is supplied, use its keywords, weighted criteria and geography to
+prioritize relevant members and formulate repeatable searches within this source. Do not
+change the accepted source identity, substitute a different directory, or treat the mission
+as verified evidence. Keep complete provenance and the existing result/tool limits.
 Every returned domain must include at least one public evidence URL surfaced by web search. Return
 no more than the requested maximum and keep organization names concise.
 """
@@ -104,6 +108,7 @@ def _resolve_sync(
     max_results: int,
     max_tool_calls: int,
     entity_hints: list[str],
+    mission_context: dict | None = None,
 ) -> AIResolution:
     result_limit = max(1, min(int(max_results), 100))
     tool_limit = max(1, min(int(max_tool_calls), 10))
@@ -122,6 +127,7 @@ def _resolve_sync(
         },
         "entity_hints": entity_hints[:100],
         "maximum_domains": result_limit,
+        **({"selected_mission": mission_context} if mission_context else {}),
     }
     client = OpenAI(
         timeout=SOURCE_DISCOVERY_AI_TIMEOUT_SECONDS,
@@ -171,6 +177,7 @@ async def resolve_source_domains(
     max_results: int = 50,
     max_tool_calls: int = 4,
     entity_hints: list[str] | None = None,
+    mission_context: dict | None = None,
 ) -> AIResolution:
     """Resolve cited official domains in one bounded Responses API call."""
 
@@ -181,4 +188,5 @@ async def resolve_source_domains(
         max_results=max_results,
         max_tool_calls=max_tool_calls,
         entity_hints=list(dict.fromkeys(entity_hints or [])),
+        **({"mission_context": mission_context} if mission_context else {}),
     )

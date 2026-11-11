@@ -45,7 +45,8 @@ THEMES = (
 REGIONS = ("United States", "United Kingdom", "Canada", "Australia", "Europe", "global")
 
 
-def source_queries(parent_id: str, search_terms: list[str] | None = None) -> list[str]:
+def source_queries(parent_id: str, search_terms: list[str] | None = None,
+                   mission_context: dict | None = None) -> list[str]:
     """A replayable varied sample, without provider/AI keyword generation."""
     rng = random.Random(hashlib.sha256(parent_id.encode()).hexdigest())
     queries = [
@@ -53,6 +54,17 @@ def source_queries(parent_id: str, search_terms: list[str] | None = None) -> lis
         f'{rng.choice(("public", "official", "companies"))}'
         for subject, roster in rng.sample(THEMES, MAX_QUERIES)
     ]
+
+    if mission_context:
+        terms = search_terms or mission_context.get("search_terms") or []
+        geography = mission_context.get("criteria", {}).get("geography", [])
+        regions = [str(term) for group in geography if isinstance(group, dict)
+                   for term in group.get("terms", [])]
+        if terms:
+            queries = [f'{terms[index % len(terms)]} "{rng.choice(THEMES)[1]}" '
+                       f'{regions[index % len(regions)] if regions else ""} official'.strip()
+                       for index in range(MAX_QUERIES)]
+        return queries
 
     # Keep the original random draw sequence and leave at least one exploration query.
     for index, term in enumerate((search_terms or [])[:5]):
@@ -149,7 +161,7 @@ async def validate_source(client, suggestion) -> bool:
 
 
 async def scout_free_sources(
-    database, parent_id: str, *, checkpoint, event, search_terms=None,
+    database, parent_id: str, *, checkpoint, event, search_terms=None, mission_context=None,
 ) -> dict:
     from .store import LeadStore
     credentials = resolve_treg_credentials()
@@ -199,7 +211,7 @@ async def scout_free_sources(
                "validated": 0, "errors": [], "status": "complete", "cost_usd": 0}
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False) as client:
-            for index, query in enumerate(source_queries(parent_id, search_terms)):
+            for index, query in enumerate(source_queries(parent_id, search_terms, mission_context)):
                 await checkpoint()
                 event("Searching for new company sources", detail=query)
                 summary["queries"].append(query)

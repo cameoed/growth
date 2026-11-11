@@ -392,8 +392,10 @@ def fill_contact_gaps(connection, packet, key, contacts, *, observed_at, model=N
                     or (field == "phone" and (_effective_phone(original) or person.get("phone")))):
                 continue
             if field == "phone" and model is None:
-                original["public_work_phone"] = {**value, "observed_at": observed_at,
-                                                 "source_kind": "public_first_party"}
+                original["public_work_phone"] = {
+                    **value, "observed_at": observed_at,
+                    "source_kind": value.get("source_kind", "public_first_party"),
+                }
             else:
                 evidence[field] = {**value, "observed_at": observed_at, "model": model,
                                    "source_kind": "ai_public_web_search"}

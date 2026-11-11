@@ -362,6 +362,10 @@ export function createCompanyWebsite(host) {
         left = Math.max(left, bounds.left); right = Math.min(right, bounds.right);
       }
     }
+    if (!expanded) {
+      const header = host.closest(".engine-company-workspace")?.querySelector("#engine-company-header");
+      if (header?.getClientRects().length) top = Math.max(top, header.getBoundingClientRect().bottom);
+    }
     send({action:"bounds", visible:visible && right > left && bottom > top, x:left, y:top,
       width:Math.max(0, right - left), height:Math.max(0, bottom - top),
       contentWidth:rect.width, contentHeight:rect.height, insetX:left - rect.left, insetY:top - rect.top,

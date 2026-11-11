@@ -104,7 +104,8 @@ class AIContactLookup(ContactIdentity):
 
 
 class WorkPhoneLookup(ContactIdentity):
-    confirmed_maximum_microusd: Literal[5000]
+    confirmed_maximum_microusd: Literal[5000, 5495] | None = None
+    manual_retry: bool = False
 
 
 class DecisionRequest(EngineModel):
@@ -369,8 +370,10 @@ def create_router(database_path):
                     from ..missions.reads import summary
 
                     packet = summary(engine, payload.mission_id, candidate_id)
-                return asyncio.run(find_phone(SalesEngineRepository(store.connection), packet,
-                                              payload.person_key))
+                return asyncio.run(find_phone(
+                    SalesEngineRepository(store.connection), packet, payload.person_key,
+                    payload.confirmed_maximum_microusd, manual_retry=payload.manual_retry,
+                ))
             except LookupError as exc:
                 raise HTTPException(404, str(exc)) from exc
             except ValueError as exc:

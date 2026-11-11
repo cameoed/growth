@@ -1,0 +1,81 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const {chromium} = require('playwright');
+const source = fs.readFileSync('src/beings_leads/dashboard/app.js','utf8');
+const code = source.slice(source.indexOf('const SAVED_SCAN_GOALS_KEY ='), source.indexOf('function bindScanSetup('));
+const css = fs.readFileSync('src/beings_leads/dashboard/styles.css','utf8');
+const html = `<style>${css}</style><dialog id="dialog" style="width:380px"><form id="scan-goal-form"><input name="goal" required><button type="submit" aria-label="Configure">Configure<span data-configuring-label hidden>Configuring…</span></button><span id="scan-goal-status"></span></form><button id="scan-basic-option">Basic</button><div id="saved-scan-goals"></div><div class="scan-option-panel" data-scan-setup-panel="smart"><textarea id="smart-scan-discovery-terms"></textarea></div><h2 id="smart-scan-options-title"></h2><p id="smart-scan-options-subtitle"></p><button id="scan-setup-start"></button><button id="start-smart-scan"></button></dialog>`;
+(async()=>{
+ const browser=await chromium.launch({channel:'chrome',headless:true});
+ try {
+  const context=await browser.newContext();
+  async function open(){
+   const page=await context.newPage();
+   await page.route('http://scan.test/**', route=>route.fulfill({contentType:'text/html',body:html}));
+   await page.goto('http://scan.test/');
+   await page.evaluate(code=>{
+    const state={}; window.testState=state; window.calls=0;
+    const $=(s,r=document)=>r.querySelector(s);
+    const escapeHtml=x=>String(x).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;');
+    const settings={search_terms:['Fortune 500 companies'],microlink_hydration:{company_limit:10,request_limit:25}};
+    for(const name of ['due_hydration_enabled','source_ai_enabled','microlink_enabled','ai_enabled','seo_enabled','people_hydration_enabled','paid_ads_enabled'])settings[name]=false;
+    settings.due_hydration_enabled=true;
+    for(const name of ['due_company_limit','ai_site_limit','seo_site_limit','people_company_limit','paid_ads_company_limit','paid_ads_max_usd'])settings[name]=5;
+    const api=async url=>{if(url.startsWith("/api/scans/mission-context"))return {search_terms:[]};window.calls++; await new Promise(resolve => {window.finishConfiguration=resolve;}); return {settings};};
+    const smartScanLaunchBlocked=()=>false,scanLaunchConflict=()=>false,updateSmartScanLaunchControls=()=>{};
+    eval(code+';bindScanGoal(document.querySelector("dialog"));');
+    $('dialog').showModal();
+   },code);
+   return page;
+  }
+  const goal='Discover the largest enterprises with global teams and enterprise marketing budgets '.repeat(3).trim();
+  let page=await open();
+  await page.locator('[name=goal]').fill(goal);
+  await page.getByRole('button',{name:'Configure',exact:true}).click();
+  await page.getByRole('button',{name:'Configuring…',exact:true}).waitFor();
+  assert.equal(await page.locator('[name=goal]').isEditable(),false);
+  assert.equal(await page.locator('#scan-goal-status').textContent(),'');
+  await page.evaluate(()=>window.finishConfiguration());
+  await page.locator('[data-saved-scan-goal]').waitFor();
+  assert.equal(await page.locator('[name=goal]').isEditable(),true);
+  assert.equal(await page.locator('#scan-goal-status').textContent(),'The scan settings below have been configured for your goal.');
+  assert.equal(await page.locator('[data-saved-scan-goal]').textContent(),goal);
+  assert.equal(await page.evaluate(()=>window.calls),1);
+  const overflow=await page.locator('.saved-scan-goal > span:last-child').evaluate(el=>({ellipsis:getComputedStyle(el).textOverflow,clipped:el.scrollWidth>el.clientWidth}));
+  assert.equal(overflow.ellipsis,'ellipsis');assert(overflow.clipped);
+  await page.close();page=await open();
+  assert.equal(await page.locator('[data-saved-scan-goal]').count(),1);
+  await page.locator('[data-saved-scan-goal]').click();
+  assert.equal(await page.locator('#smart-scan-discovery-terms').inputValue(),'Fortune 500 companies');
+  assert.equal(await page.evaluate(()=>window.calls),0);
+  assert.equal(await page.locator('[data-saved-scan-goal]').getAttribute('aria-pressed'),'true');
+  await page.locator('#scan-basic-option').click();
+  assert.equal(await page.locator('#scan-basic-option').getAttribute('aria-pressed'),'true');
+  assert.equal(await page.locator('[data-saved-scan-goal]').getAttribute('aria-pressed'),'false');
+  assert.equal(await page.evaluate(()=>window.testState.smartScanDueHydrationEnabled),true);
+  assert.equal(await page.evaluate(()=>window.testState.smartScanDueCompanyLimit),null);
+  assert.equal(await page.evaluate(()=>window.calls),0);
+  await page.locator('.saved-scan-goal-row').hover();
+  await page.locator('[data-delete-scan-goal]').click();
+  assert.equal(await page.locator('[data-saved-scan-goal]').count(),0);
+  assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('beings.scan.saved-goals.v1')).length),0);
+  await page.locator('[name=goal]').fill('A second company research goal');
+  await page.getByRole('button',{name:'Configure',exact:true}).click();
+  await page.getByRole('button',{name:'Configuring…',exact:true}).waitFor();
+  await page.locator('dialog').evaluate(dialog => dialog.close());
+  await page.evaluate(()=>window.finishConfiguration());
+  await page.waitForFunction(()=>!document.querySelector('[name=goal]').readOnly);
+  assert.equal(await page.locator('[data-saved-scan-goal]').count(),0);
+  const navigation = source.slice(source.indexOf('function selectDiscoveryTab('),source.indexOf('function smartScanActive('));
+  await page.evaluate(code=>{
+    document.body.insertAdjacentHTML('beforeend','<div id="scan-methods-content"></div><div class="discovery-tabs"><button data-discovery-tab="one">One</button><button data-discovery-tab="two">Two</button></div><section id="discovery-panel-one" data-discovery-panel="one" hidden>One settings</section><section id="discovery-panel-two" data-discovery-panel="two" hidden>Two settings</section>');
+    const state={}, $=(s)=>document.querySelector(s), $$=(s)=>[...document.querySelectorAll(s)];
+    const discoveryTabs=()=>[{id:'one'},{id:'two'}];
+    const refreshSelectedScanEstimate=()=>{};
+    eval(code+';selectDiscoveryTab("two",{focus:true});');
+  },navigation);
+  assert.equal(await page.locator('[data-discovery-panel][hidden]').count(),0);
+  assert.equal(await page.locator('[data-discovery-tab][tabindex="0"]').count(),2);
+  console.log('Presets persist, truncate, restore without AI calls, and delete.');
+ } finally {await browser.close();}
+})();

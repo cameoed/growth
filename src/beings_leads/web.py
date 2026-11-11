@@ -133,6 +133,7 @@ from .scan_activity import decode_scan_action
 from .scan_diagnostics import CHILD_ENV, MARKER, SCAN_ID, SOURCE, source_time, source_trace
 from .scan_diagnostics import emit as emit_scan_diagnostic
 from .scan_diagnostics import error_fields as scan_diagnostic_error
+from .scan_goal import ScanGoalRequest
 from .scanner_manifest import validate_manifest
 from .site_research import DEFAULT_SITE_RESEARCH_PAGES
 from .smart_scan_audit import measure_operation
@@ -700,12 +701,25 @@ class SourceHydrationSupplementRequest(BaseModel):
         return self
 
 
+def scan_mission_context(mission_id="beings"):
+    if mission_id in {"beings", "all"}:
+        return {}
+    from .missions.scan_context import scan_context
+    try:
+        with LeadStore(database_path(), initialize=False, read_only=True) as store:
+            return scan_context(store.connection, mission_id)
+    except (ValueError, LookupError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 class SmartScanStartRequest(BaseModel):
+    mission_id: str = Field(default="beings", min_length=1, max_length=100)
     model_config = ConfigDict(extra="forbid")
 
     search_terms: list[str] = Field(default_factory=list, max_length=5)
 
     due_hydration_enabled: bool = True
+    due_company_limit: int | None = Field(default=None, ge=1, le=10_000)
     people_hydration_enabled: bool = False
     people_company_limit: int = Field(default=100, ge=1, le=TREG_PEOPLE_MAX_COHORT_SIZE)
     paid_ads_enabled: bool = False
@@ -755,6 +769,7 @@ class SmartScanStartRequest(BaseModel):
 
 
 class WebScanEstimateRequest(BaseModel):
+    mission_id: str = Field(default="beings", min_length=1, max_length=100)
     model_config = ConfigDict(extra="forbid")
 
     max_hosts_per_source: int = Field(default=10_000, ge=1, le=10_000)
@@ -766,6 +781,7 @@ class WebScanEstimateRequest(BaseModel):
 
 
 class SourceScoutRequest(BaseModel):
+    mission_id: str = Field(default="beings", min_length=1, max_length=100)
     max_suggestions: int = Field(default=DEFAULT_SCOUT_SUGGESTIONS, ge=1, le=12)
     max_tool_calls: int = Field(default=DEFAULT_SCOUT_TOOL_CALLS, ge=1, le=10)
     keyword_combinations: int = Field(
@@ -776,6 +792,7 @@ class SourceScoutRequest(BaseModel):
 
 
 class DiscoveryMethodRunRequest(BaseModel):
+    mission_id: str = Field(default="beings", min_length=1, max_length=100)
     model_config = ConfigDict(extra="forbid")
 
     method: Literal[
@@ -893,6 +910,7 @@ class AdDomainLinkReview(BaseModel):
 
 
 class ScanRequest(BaseModel):
+    mission_id: str = Field(default="beings", min_length=1, max_length=100)
     sources: list[str] | None = None
     only_hosts: list[str] | None = Field(default=None, max_length=10_000)
     max_hosts_per_source: int = Field(default=100, ge=1, le=10_000)
@@ -1824,6 +1842,7 @@ class SourceScoutManager:
             raise HTTPException(status_code=409, detail="A source scout is already running")
         if not os.getenv("OPENAI_API_KEY"):
             raise HTTPException(status_code=422, detail="OPENAI_API_KEY is not configured")
+        scan_mission_context(request.mission_id)
         model = self._model()
         logger.info(
             "starting source scout model=%s suggestions=%d tool_calls=%d keyword_combinations=%d",
@@ -1920,6 +1939,8 @@ class SourceScoutManager:
                 cycle=run_id,
                 prior_source_outcomes=prior_source_outcomes,
                 recent_query_fingerprints=recent_query_fingerprints,
+                **({"mission_context": scan_mission_context(request.mission_id)}
+                   if request.mission_id not in {"beings", "all"} else {}),
             )
             coverage = _source_scout_output_coverage(suggestions)
             diagnostics = _source_scout_diagnostics(suggestions)
@@ -1931,6 +1952,7 @@ class SourceScoutManager:
                 "max_tool_calls": request.max_tool_calls,
                 "keyword_combinations": request.keyword_combinations,
                 "trigger": trigger,
+                "mission_id": request.mission_id,
                 **diagnostics,
                 **coverage,
             }
@@ -2731,6 +2753,8 @@ class DiscoveryMethodManager:
         self,
         request: DiscoveryMethodRunRequest,
     ) -> list[SourceSuggestion]:
+        if request.mission_id not in {"beings", "all"}:
+            scan_mission_context(request.mission_id)
         if request.method in SERVER_OWNED_DISCOVERY_METHODS:
             return []
         with LeadStore(database_path()) as store:
@@ -2780,6 +2804,13 @@ class DiscoveryMethodManager:
                 status_code=422,
                 detail=f"Sources do not belong to {request.method}: {', '.join(incompatible)}",
             )
+        if request.mission_id not in {"beings", "all"}:
+            from .missions.scan_context import source_preference
+            context = scan_mission_context(request.mission_id)
+            pairs = sorted(zip(request.suggestion_ids, suggestions, strict=True),
+                           key=lambda pair: -source_preference(pair[1], context))
+            request.suggestion_ids = [pair[0] for pair in pairs]
+            suggestions = [pair[1] for pair in pairs]
         return suggestions
 
     def validate(
@@ -2983,13 +3014,18 @@ class DiscoveryMethodManager:
                 self.state.update(totals)
             if request.method == "company_intelligence":
                 with LeadStore(database_path()) as store:
-                    prospects = store.list_prospects(
-                        min_score=0,
-                        live=True,
-                        excluded=False,
-                        sort="priority",
-                        limit=request.max_candidates,
-                    )["items"]
+                    if request.mission_id in {"beings", "all"}:
+                        prospects = store.list_prospects(
+                            min_score=0, live=True, excluded=False, sort="priority",
+                            limit=request.max_candidates,
+                        )["items"]
+                    else:
+                        from .missions.scan_context import ranked_candidate_ids
+                        ids = ranked_candidate_ids(
+                            store, request.mission_id, request.max_candidates)
+                        prospects = [dict(store.connection.execute(
+                            "SELECT hostname FROM candidates WHERE id=?", (candidate_id,)
+                        ).fetchone()) for candidate_id in ids]
                     hosts = [str(item["hostname"]) for item in prospects]
                     existing = store.candidates_by_hosts(hosts)
                 candidates_by_host = {item.hostname: item for item in existing}
@@ -3083,6 +3119,8 @@ class DiscoveryMethodManager:
                                 result = await discover_source(
                                     client,
                                     suggestion,
+                                    **({"mission_context": scan_mission_context(request.mission_id)}
+                                       if request.mission_id not in {"beings", "all"} else {}),
                                     limits=limits,
                                     ai_model=ai_model,
                                     allow_ai=allow_ai,
@@ -3235,6 +3273,7 @@ class DiscoveryMethodManager:
                     frontier_scanner_ids=(
                         request.scanner_ids if request.method == "company_intelligence" else []
                     ),
+                    mission_id=request.mission_id,
                     agency_discovery=request.method == "public_graph",
                     ai=(
                         request.method != "company_intelligence"
@@ -3917,6 +3956,7 @@ class AdDiscoveryManager:
     def create_quote(self, request: AdDiscoveryRequest) -> dict[str, object]:
         """Compute and retain a quote without touching Apify or paid-run persistence."""
         self._prune_quotes()
+        scan_mission_context(request.mission_id)
         quote = estimate_ad_scan(request)
         issued_at = datetime.now(UTC)
         expires_at = issued_at + timedelta(minutes=AD_QUOTE_TTL_MINUTES)
@@ -4004,6 +4044,13 @@ class AdDiscoveryManager:
         token: str,
         *, seed_candidate_ids: list[int] | None = None,
     ) -> None:
+        if (seed_candidate_ids is None and request.mode in {"hydrate", "both"}
+                and request.existing_target_limit > 0
+                and request.mission_id not in {"beings", "all"}):
+            from .missions.scan_context import ranked_candidate_ids
+            with LeadStore(database_path(), initialize=False) as store:
+                seed_candidate_ids = ranked_candidate_ids(
+                    store, request.mission_id, request.existing_target_limit)
         executor = AdDiscoveryExecutor(
             database_path(),
             token,
@@ -4304,16 +4351,23 @@ def _smart_scan_people_estimate(company_limit: int) -> dict:
             "estimate_usd": float(estimate["maximum_usd"])}
 
 
-def _smart_scan_ad_plan(company_limit: int, maximum: Decimal) -> dict:
+def _smart_scan_ad_plan(company_limit: int, maximum: Decimal,
+                        mission_id: str = "beings") -> dict:
     with LeadStore(database_path(), initialize=False, read_only=True) as store:
         store.connection.execute("BEGIN")
-        cohort = store.treg_people_ranking_candidates(limit=company_limit, include_target=False)
-        ids = [int(item["candidate_id"]) for item in cohort]
+        if mission_id not in {"beings", "all"}:
+            from .missions.scan_context import ranked_candidate_ids
+            ids = ranked_candidate_ids(store, mission_id, company_limit)
+            cohort = [{"candidate_id": value} for value in ids]
+        else:
+            cohort = store.treg_people_ranking_candidates(limit=company_limit, include_target=False)
+            ids = [int(item["candidate_id"]) for item in cohort]
         seeds = store.select_ad_hydration_seeds(
             limit=company_limit, candidate_ids=ids, lane="all", scope="all", only_due=True,
             include_details=False,
         )
     request = AdDiscoveryRequest(
+        mission_id=mission_id,
         mode="hydrate", existing_target_limit=max(1, len(seeds)),
         meta_ads_per_query=20, meta_ads_per_advertiser=20, max_new_advertisers=0,
         hydrate_websites=False, website_hydration_limit=0, max_total_charge_usd=maximum,
@@ -4330,6 +4384,7 @@ def _smart_scan_paid_estimate(
     ai_sites: int, seo_sites: int, due_hydration: bool, source_ai: bool | None = None,
     microlink: bool = False, people_sites: int = 0,
     ads_sites: int = 0, ads_max_usd: Decimal = Decimal("5.00"),
+    mission_id: str = "beings",
 ) -> dict:
     from .paid_scan_plan import ai_plan, seo_plan
 
@@ -4351,7 +4406,10 @@ def _smart_scan_paid_estimate(
         + seo["bulk_due"] * SMART_SCAN_DATAFORSEO_BULK_ITEM_ESTIMATE_USD
         + seo["detail_due"] * SMART_SCAN_DATAFORSEO_DETAIL_TASK_ESTIMATE_USD
     )
-    ads = _smart_scan_ad_plan(ads_sites, ads_max_usd) if ads_sites else {}
+    ads = (_smart_scan_ad_plan(
+        ads_sites, ads_max_usd,
+        **({"mission_id": mission_id} if mission_id not in {"beings", "all"} else {}),
+    ) if ads_sites else {})
     return {
         "ads": {key: value for key, value in ads.items()
                 if key not in {"request", "candidate_ids"}},
@@ -4378,6 +4436,8 @@ def _smart_scan_profile() -> dict[str, object]:
         SMART_SCAN_DATAFORSEO_DEFAULT_TARGET_LIMIT
     )
     return {
+        "scan_goal_available": True,
+        "due_company_limit_available": True,
         "people_limit_control_available": True,
         "people_company_default": 100,
         "paid_reuse_estimate_available": True,
@@ -4778,6 +4838,7 @@ class SmartScanManager:
         completed: int | None = None,
         total: int | None = None,
         current: str | None = None,
+        in_flight: int | None = None,
     ) -> None:
         work = dict(self.state.get("work") or {})
         if completed is not None:
@@ -4786,24 +4847,19 @@ class SmartScanManager:
             work["total"] = max(0, int(total))
         if current is not None:
             work["current"] = current
-        completed_units = int(work.get("completed") or 0)
-        total_units = int(work.get("total") or 0)
+        if in_flight:
+            work["in_flight"] = in_flight
+        elif in_flight == 0:
+            work.pop("in_flight", None)
+        attempted = int(work.get("completed") or 0) + int(work.get("in_flight") or 0)
+        # Discovery and concurrent source work can expand the original plan.
+        # Preserve actual attempted work instead of presenting more than 100%.
+        total_units = max(int(work.get("total") or 0), attempted)
+        work["total"] = total_units
+        percent = 0.0
         if total_units:
-            completed_units = min(completed_units, total_units)
-            work["completed"] = completed_units
-            ceiling = 99.0 if str(self.state.get("status")) in {
-                "starting", "running", "paused", "reconnecting", "restarting",
-            } else 100.0
-            percent = min(ceiling, round(completed_units / total_units * 100, 2))
-            phase_index = int(self.state.get("phase_index") or 0)
-            phase_count = int(self.state.get("phase_count") or 0)
-            if ceiling == 99.0 and phase_index and phase_count:
-                # Work is discovered as we go; completed phases are the only complete
-                # denominator. Never present a nearly finished page as a nearly finished scan.
-                percent = round(max(0, phase_index - 1) / phase_count * 100, 2)
-                self.state["progress_basis"] = "completed_phases"
-        else:
-            percent = 0.0
+            percent = min(99.0, round(attempted / total_units * 100, 2))
+        self.state["progress_basis"] = "estimated_work"
         self.state["work"] = work
         self.state["progress_percent"] = percent
 
@@ -5071,7 +5127,10 @@ class SmartScanManager:
         due_hydration_enabled = bool(recovered.get("due_hydration_enabled", True))
         remaining_units = (
             (
-                int(inventory.get("due_candidates") or 0)
+                min(int(inventory.get("due_candidates") or 0), max(0,
+                    int(recovered["due_company_limit"])
+                    - int(recovered_counters.get("hydration_hosts_submitted") or 0))
+                    if recovered.get("due_company_limit") else 10**15)
                 + int(inventory.get("accepted_sources_due") or 0)
                 + 5
                 + (len(RSS_SOURCES) - len(recovered.get("rss_sources_done") or [])
@@ -5121,7 +5180,7 @@ class SmartScanManager:
                 "people_hydration_enabled": bool(recovered.get("people_hydration_enabled", False)),
             }
         )
-        self._set_work(completed=completed, total=completed + remaining_units)
+        self._set_work(completed=completed, total=completed + remaining_units, in_flight=0)
         self._event("Smart Scan resumed after app restart")
         self._persist_state()
         await self._flush_persistence()
@@ -5133,6 +5192,9 @@ class SmartScanManager:
         request: SmartScanStartRequest | None = None,
     ) -> dict[str, object]:
         request = request or SmartScanStartRequest()
+        context = scan_mission_context(request.mission_id)
+        if not request.search_terms and context:
+            request.search_terms = context.get("search_terms", [])[:5]
         if self.active:
             raise HTTPException(status_code=409, detail="A Smart Scan is already running")
         conflicts = []
@@ -5164,7 +5226,9 @@ class SmartScanManager:
             "message": "Checking scan preparation", "events": [],
             "id": uuid.uuid4().hex[:12],
             "options": {
+                "mission_id": request.mission_id,
                 "due_hydration_enabled": request.due_hydration_enabled,
+                "due_company_limit": request.due_company_limit,
                 "search_terms": request.search_terms,
                 "paid_ads_enabled": request.paid_ads_enabled,
                 "paid_ads_company_limit": request.paid_ads_company_limit,
@@ -5233,6 +5297,8 @@ class SmartScanManager:
                         **({"people_sites": request.people_company_limit}
                            if request.people_hydration_enabled
                            and inventory.get("people_hydration_configured") else {}),
+                        **({"mission_id": request.mission_id}
+                           if request.mission_id not in {"beings", "all"} else {}),
                     )
                 except Exception:
                     # Reuse estimates are advisory; execution retains its paid caps.
@@ -5285,6 +5351,9 @@ class SmartScanManager:
         self.last_runtime_tick = datetime.now(UTC)
         self.control_event.set()
         started_at = str(preparation["started_at"])
+        with LeadStore(database_path(), initialize=False) as store:
+            from .missions.scan_context import scan_context
+            mission_context = scan_context(store.connection, request.mission_id)
         source_units = (
             int(inventory.get("accepted_sources_due") or 0) + 2 + len(RSS_SOURCES)
             if request.due_hydration_enabled else 0
@@ -5308,7 +5377,8 @@ class SmartScanManager:
             else 0
         )
         total_work_units = (
-            (int(inventory.get("due_candidates") or 0) if request.due_hydration_enabled else 0)
+            (min(int(inventory.get("due_candidates") or 0), request.due_company_limit or 10**15)
+             if request.due_hydration_enabled else 0)
             + source_units
             + ai_units
             + dataforseo_units
@@ -5319,6 +5389,8 @@ class SmartScanManager:
         )
         self.state = {
             "id": preparation["id"],
+            "mission_id": request.mission_id,
+            "mission_context": mission_context,
             "scan_audit": {"operations": {"planning": {
                 "elapsed_seconds": preparation.get("elapsed_seconds", 0.0),
                 "outcomes": {"complete": 1},
@@ -5336,6 +5408,7 @@ class SmartScanManager:
             "new_companies_added": 0,
             "max_company_failure_rate": request.max_company_failure_rate,
             "due_hydration_enabled": request.due_hydration_enabled,
+            "due_company_limit": request.due_company_limit,
             "search_terms": request.search_terms,
             "ai_enabled": request.ai_enabled,
             "source_ai_enabled": request.source_ai_enabled,
@@ -5796,20 +5869,19 @@ class SmartScanManager:
         activity: str = "company scan",
     ) -> dict[str, object]:
         request.microlink_enabled = bool(self.state.get("microlink_enabled", True))
-        baseline = int(dict(self.state.get("work") or {}).get("completed") or 0)
         error_baseline = int(self.state.get("error_total") or 0)
         while True:
             await self._checkpoint()
             if self.state.get("reconnect_pending"):
                 await self._wait_for_internet(reason="Resuming interrupted network work")
-            result = await self._wait_for_scan_attempt(
-                request,
-                sources,
-                maximum,
-                work_units=work_units,
-                activity=activity,
-                work_baseline=baseline,
-            )
+            try:
+                result = await self._wait_for_scan_attempt(
+                    request, sources, maximum, work_units=work_units, activity=activity,
+                )
+            finally:
+                if work_units:
+                    self._set_work(in_flight=0)
+                    self._persist_state()
             if str(result.get("status")) == "reconnect_retry":
                 self._event(
                     "Retrying interrupted child work",
@@ -5828,6 +5900,8 @@ class SmartScanManager:
                     detail=activity,
                 )
                 continue
+            if work_units and str(result.get("status")) in {"complete", "partial"}:
+                self._advance_work(work_units, current=activity)
             self._promote_child_result_errors(
                 result,
                 activity=activity,
@@ -5846,7 +5920,6 @@ class SmartScanManager:
         *,
         work_units: int = 0,
         activity: str = "company scan",
-        work_baseline: int = 0,
     ) -> dict[str, object]:
         from .async_work import run_thread_owned
 
@@ -6013,7 +6086,7 @@ class SmartScanManager:
                     most_processed = processed
                     if work_units:
                         self._set_work(
-                            completed=work_baseline + min(work_units, most_processed),
+                            in_flight=min(work_units, most_processed),
                             current=f"{activity}: {child_phase.replace('_', ' ')}",
                         )
                         self._persist_state()
@@ -6064,9 +6137,6 @@ class SmartScanManager:
                 )
                 emit_activities(final_activities, last_phase or "complete")
                 emit_source_errors(final_source_errors)
-            if work_units:
-                self._set_work(completed=work_baseline + work_units, current=activity)
-                self._persist_state()
             return dict(job.state)
         return dict(scan_manager.status_for(job_id or None))
 
@@ -6200,6 +6270,8 @@ class SmartScanManager:
                     database_path(), str(self.state.get("id") or ""),
                     checkpoint=self._checkpoint, event=self._event,
                     search_terms=self.state.get("search_terms", []),
+                    **({"mission_context": self.state["mission_context"]}
+                       if self.state.get("mission_context") else {}),
                 )
                 if result.get("status") != "unavailable":
                     self.state["free_source_scout_complete"] = True
@@ -6223,6 +6295,7 @@ class SmartScanManager:
                     database_path(), str(self.state.get("id") or ""),
                     checkpoint=self._checkpoint, event=self._event,
                     search_terms=self.state.get("search_terms", []),
+                    mission_context=self.state.get("mission_context") or {},
                 )
                 if result.get("status") != "unavailable":
                     self.state["ai_query_scout_tool_calls_reserved"] = (
@@ -6259,6 +6332,7 @@ class SmartScanManager:
         while True:
             result = await source_scout_manager.run_inline(
                 SourceScoutRequest(
+                    mission_id=self.state.get("mission_id", "beings"),
                     max_suggestions=DEFAULT_SCOUT_SUGGESTIONS,
                     max_tool_calls=legacy_cap,
                     keyword_combinations=DEFAULT_SCOUT_KEYWORD_COMBINATIONS,
@@ -6293,6 +6367,10 @@ class SmartScanManager:
                 continue
             if _source_scan_policy(row)["scan_eligible"]:
                 due_rows.append((row, suggestion))
+        if self.state.get("mission_context"):
+            from .missions.scan_context import source_preference
+            due_rows.sort(key=lambda pair: -source_preference(
+                pair[1], self.state["mission_context"]))
         self.state["source_progress"] = {"completed": 0, "total": len(due_rows)}
         self._event("Accepted source queue mapped", detail=f"{len(due_rows):,} due sources")
         parallelism = 1 if self.state.get("source_ai_enabled", self.state.get("ai_enabled")) else 3
@@ -6338,6 +6416,7 @@ class SmartScanManager:
                 return
             ai_resolution = ai_enabled and remaining_ai > 0
             request = DiscoveryMethodRunRequest(
+                mission_id=self.state.get("mission_id", "beings"),
                 method=method,
                 suggestion_ids=[int(row["id"])],
                 max_pages=AUTO_SOURCE_MAX_PAGES,
@@ -6568,6 +6647,7 @@ class SmartScanManager:
         try:
             result = await self._run_discovery_request(
                 DiscoveryMethodRunRequest(
+                    mission_id=self.state.get("mission_id", "beings"),
                     method=method,
                     max_pages=1,
                     max_candidates=500,
@@ -6910,16 +6990,22 @@ class SmartScanManager:
         )
         deferred_batches: list[tuple[int, list[str], str]] = []
         failure_limit = self.state.get("max_company_failure_rate")
+        company_limit = self.state.get("due_company_limit")
+        remaining_limit = max(0, int(company_limit) - prior_submitted) if company_limit else None
+        if remaining_limit is not None:
+            due_total = min(due_total, remaining_limit)
 
         def read_due_page(after_id):
             with LeadStore(database_path(), initialize=False, read_only=True) as store:
                 store.connection.execute("BEGIN")
                 return store.smart_scan_due_candidates(
                     after_candidate_id=after_id, max_candidate_id=boundary,
-                    limit=SMART_SCAN_HYDRATION_BATCH_SIZE, max_company_failure_rate=failure_limit,
+                    limit=min(SMART_SCAN_HYDRATION_BATCH_SIZE, remaining_limit - submitted)
+                    if remaining_limit is not None else SMART_SCAN_HYDRATION_BATCH_SIZE,
+                    max_company_failure_rate=failure_limit,
                 )
 
-        while cursor < boundary:
+        while cursor < boundary and (remaining_limit is None or submitted < remaining_limit):
             await self._checkpoint()
             with source_trace("refresh_due_page", after_candidate_id=cursor) as metrics:
                 page = await run_thread_owned(read_due_page, cursor)
@@ -6950,6 +7036,11 @@ class SmartScanManager:
                 detail=f"{submitted:,}/{due_total:,} due records submitted",
                 replace_key="hydration-progress",
             )
+            if company_limit:
+                counters = dict(self.state.get("counters") or {})
+                counters["hydration_hosts_submitted"] = prior_submitted + submitted
+                self.state["counters"] = counters
+                self._persist_state()
             try:
                 result = await self._wait_for_scan(
                     self._hydration_request(hosts),
@@ -7031,9 +7122,15 @@ class SmartScanManager:
             )
         self._event(
             "Late-source hydration pass complete" if after_candidate_id
-            else "Full-base hydration pass complete",
+            else "Company refresh pass complete",
             detail=f"{submitted:,} due records submitted in {batch_number:,} batches",
         )
+        if company_limit:
+            self.state["hydration_progress"] = {
+                **dict(self.state.get("hydration_progress") or {}), "stage": "complete",
+            }
+            self._persist_state()
+            return
         self.state["hydration_progress"] = {
             **dict(self.state.get("hydration_progress") or {}),
             "stage": "scanners", "candidate_boundary": boundary,
@@ -7779,6 +7876,8 @@ class SmartScanManager:
             plan = await asyncio.to_thread(
                 _smart_scan_ad_plan, int(self.state["paid_ads_company_limit"]),
                 Decimal(str(self.state["paid_ads_max_usd"])),
+                **({"mission_id": self.state["mission_id"]}
+                   if self.state.get("mission_context") else {}),
             )
             if not plan["candidate_ids"]:
                 self.state["paid_ads_complete"] = True
@@ -8355,7 +8454,9 @@ class SmartScanManager:
             finished_at = datetime.now(UTC).isoformat()
             work = dict(self.state.get("work") or {})
             self._set_work(
-                completed=int(work.get("total") or 0),
+                completed=max(int(work.get("total") or 0),
+                              int(work.get("completed") or 0)),
+                in_flight=0,
                 current="Smart Scan complete",
             )
             self.state.update(
@@ -12057,6 +12158,7 @@ def scan_status(job_id: str | None = Query(default=None, max_length=64)) -> dict
             status.update(progress)
     # Read only in-memory telemetry; global status must not hydrate inventories or start work.
     fields = {"id", "run_id", "status", "phase", "phase_index", "progress_percent",
+              "progress_basis",
               "started_at", "updated_at", "finished_at", "error_total", "phase_errors",
               "resumed_after_restart_at", "summary", "method", "method_label", "work",
               "new_companies_added", "source_progress"}
@@ -12082,6 +12184,7 @@ def scan_status(job_id: str | None = Query(default=None, max_length=64)) -> dict
 @app.post("/api/web-scan/estimates")
 def estimate_web_scan(request: WebScanEstimateRequest) -> dict:
     """Describe one deterministic web scan without starting network work."""
+    scan_mission_context(request.mission_id)
     if request.people_hydration_enabled and resolve_treg_credentials() is None:
         raise HTTPException(422, "Configure Treg in Settings for People hydration")
     if request.microlink_enabled and not os.getenv(MICROLINK_SECRET):
@@ -12107,6 +12210,7 @@ def estimate_web_scan(request: WebScanEstimateRequest) -> dict:
         email_max_cost_usd=DEFAULT_EMAIL_MAX_COST_USD,
     )
     scan_request = ScanRequest(
+        mission_id=request.mission_id,
         sources=sources,
         people_hydration_enabled=request.people_hydration_enabled,
         microlink_enabled=request.microlink_enabled,
@@ -12409,6 +12513,7 @@ async def sync_spending_history() -> dict:
 @app.get("/api/smart-scan/paid-estimate")
 async def smart_scan_paid_estimate(
     request: Request,
+    mission_id: str = "beings",
     ai_sites: int = Query(default=0, ge=0, le=SMART_SCAN_MAX_CANDIDATE_AI_CALLS),
     seo_sites: int = Query(default=0, ge=0, le=SMART_SCAN_DATAFORSEO_MAX_TARGET_LIMIT),
     due_hydration: bool = Query(default=True),
@@ -12420,10 +12525,12 @@ async def smart_scan_paid_estimate(
                                 le=Decimal("100.00"), decimal_places=2),  # noqa: B008
 ) -> dict:
     _require_loopback(request)
+    scan_mission_context(mission_id)
     return await asyncio.to_thread(
         _smart_scan_paid_estimate, ai_sites, seo_sites, due_hydration, source_ai, microlink,
         **({"people_sites": people_sites} if people_sites else {}),
         **({"ads_sites": ads_sites, "ads_max_usd": ads_max_usd} if ads_sites else {}),
+        **({"mission_id": mission_id} if mission_id not in {"beings", "all"} else {}),
     )
 
 
@@ -12486,6 +12593,38 @@ async def smart_scan_inventory_status(check_id: str | None = None) -> dict[str, 
     if any(current.get(field) != payload.get(field) for field in ("id", "status", "updated_at")):
         return current
     return {**current, **result, "inventory_cache_scope": scope}
+
+
+@app.get("/api/scans/mission-context")
+def selected_scan_mission_context(mission_id: str = "beings") -> dict:
+    try:
+        return scan_mission_context(mission_id)
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/smart-scan/configure")
+def configure_smart_scan_goal(request: Request, payload: ScanGoalRequest) -> dict:
+    from .scan_goal import configure_goal
+
+    _require_loopback(request)
+    capabilities = {
+        "openai": bool(os.getenv(OPENAI_SECRET)),
+        "seo": _dataforseo_configured(),
+        "people": resolve_treg_credentials() is not None,
+        "ads": bool(os.getenv(APIFY_SECRET)),
+        "microlink": bool(os.getenv(MICROLINK_SECRET)),
+    }
+    try:
+        with (LeadStore(database_path(), initialize=False) as store,
+              rate_limit_scope(database_path())):
+            return configure_goal(store.connection, payload, capabilities)
+    except (ValueError, LookupError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Scan goal configuration failed")
+        raise HTTPException(502, "AI configuration was unavailable. Your scan settings were kept; "
+                            "any unconfirmed cost remains reserved.") from exc
 
 
 @app.post("/api/smart-scan", status_code=202)

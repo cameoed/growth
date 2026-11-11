@@ -144,7 +144,7 @@ function renderMissions() {
 
 function missionDialogShell(title, body, footer, {formId="", attributes=""} = {}) {
   const tag=formId ? "form" : "div";
-  return `<${tag} ${formId ? `id="${formId}"` : ""} class="engine-mission-dialog-content" ${attributes}><header class="engine-mission-dialog-head"><div><span class="engine-mission-eyebrow">Prospecting missions</span><h2 id="engine-mission-dialog-title">${esc(title)}</h2></div><button type="button" class="engine-mission-close" data-engine="mission-cancel" aria-label="Close mission dialog">×</button></header><div class="engine-mission-dialog-body">${body}<p id="engine-mission-error" class="engine-mission-dialog-error" role="alert" hidden></p></div><footer class="engine-mission-dialog-actions">${footer}</footer></${tag}>`;
+  return `<${tag} ${formId ? `id="${formId}"` : ""} class="engine-mission-dialog-content" ${attributes}><header class="engine-mission-dialog-head"><div><span class="engine-mission-eyebrow">Prospecting missions</span><h2 id="engine-mission-dialog-title" tabindex="-1" ${body.includes(" autofocus") ? "" : "autofocus"}>${esc(title)}</h2></div><button type="button" class="engine-mission-close" data-engine="mission-cancel" aria-label="Close mission dialog">×</button></header><div class="engine-mission-dialog-body">${body}<p id="engine-mission-error" class="engine-mission-dialog-error" role="alert" hidden></p></div><footer class="engine-mission-dialog-actions">${footer}</footer></${tag}>`;
 }
 function missionManager() {
   const disabled=missionMutation ? "disabled" : "";
@@ -184,7 +184,7 @@ function openMissionDialog(type, id=missionId) {
   }
   dialog.oncancel=event=>{if(missionMutation)event.preventDefault();else missionDialogView=null;};
   if(!dialog.open)dialog.showModal();
-  const focus=dialog.querySelector('[autofocus]') || dialog.querySelector('select') || dialog.querySelector('.engine-mission-close');
+  const focus=dialog.querySelector('[autofocus]') || dialog.querySelector('select') || dialog.querySelector('#engine-mission-dialog-title');
   focus?.focus();
 }
 function closeMissionDialog() {
@@ -408,13 +408,7 @@ function syncContactLookupButton() {
 }
 function syncLoadingIndicators() {
   syncContactLookupButton();
-  const banner = document.querySelector("#company-loading-banner");
-  const list = state.tab === "pipeline" ? pipelineData : state.overview;
-  if (banner) banner.hidden = !(
-    (active && isLoadingMessage(state.message))
-    || (list?.loading && isLoading("list"))
-    || ((!state.packet || state.packet.summary_loading) && isLoading("summary"))
-  );
+  syncHeaderStatus();
   for (const node of document.querySelectorAll("[data-engine-loading]")) node.hidden = !isLoading(node.dataset.engineLoading);
   for (const [kind, selector] of [["list", "#engine-list"], ["summary", "#engine-lead"]]) {
     document.querySelector(selector)?.setAttribute("aria-busy", String(isLoading(kind)));
@@ -465,6 +459,32 @@ export function setSalesMode(mode) {
   if (state.tab !== tab) { listOffset = 0; resetSelection(); ++overviewNumber; abortRequest("list"); }
   state.tab = tab;
 }
+export function captureSalesLocation() {
+  return {
+    missionId, tab:state.tab, search:state.search, selectedTag, companySort,
+    listOffset, pageSize, selectedKey,
+    listScroll:document.querySelector(".engine-company-list")?.scrollTop || 0,
+    workspaceScroll:document.querySelector(".engine-company-workspace")?.scrollTop || 0,
+  };
+}
+export function restoreSalesLocation(saved) {
+  if (!saved || saved.missionId !== missionId) return false;
+  state.tab = saved.tab === "pipeline" ? "pipeline" : "queue";
+  state.search = typeof saved.search === "string" ? saved.search : "";
+  selectedTag = typeof saved.selectedTag === "string" ? saved.selectedTag : "";
+  companySort = saved.companySort === "newest" ? "newest" : "ranked";
+  if (pageSizes.includes(saved.pageSize)) pageSize = saved.pageSize;
+  listOffset = Number.isSafeInteger(saved.listOffset) && saved.listOffset >= 0 ? saved.listOffset : 0;
+  selectedKey = /^\/(companies|pipeline)\/[1-9]\d*$/.test(saved.selectedKey || "") ? saved.selectedKey : "";
+  return true;
+}
+export function restoreSalesScroll(saved) {
+  for (const [selector, key] of [[".engine-company-list", "listScroll"], [".engine-company-workspace", "workspaceScroll"]]) {
+    const node = document.querySelector(selector);
+    if (node && Number.isFinite(saved?.[key]) && saved[key] >= 0) node.scrollTop = saved[key];
+  }
+}
+
 export async function searchSalesWorkbench(query) {
   state.search = query; listOffset = 0; resetSelection();
   await loadSalesWorkbench();
@@ -521,12 +541,40 @@ async function fetchCached(path, controller) {
   remember(responseCache, path, {value, etag:response.headers?.get("ETag"), receivedAt:Date.now()}, CACHE_LIMIT);
   return value;
 }
+let connectionStatus = null;
+let pageStatus = "";
+document.addEventListener?.("beings-page-status", event => {
+  pageStatus = event.detail?.text || "";
+  syncHeaderStatus();
+});
 function isLoadingMessage(text) { return /^Loading(?:…|\.\.\.)$/.test(text); }
+function isConnectionInterrupted(text) { return text === "The VM connection was interrupted."; }
+function syncHeaderStatus() {
+  const banner = document.querySelector("#company-loading-banner");
+  if (!banner) return;
+  const list = state.tab === "pipeline" ? pipelineData : state.overview;
+  const message = active ? state.message : "";
+  const loading = isLoadingMessage(message) || (list?.loading && isLoading("list"))
+    || ((!state.packet || state.packet.summary_loading) && isLoading("summary"));
+  const notice = isConnectionInterrupted(message) ? message : connectionStatus?.title;
+  const text = notice || (!active ? pageStatus : message && !isLoadingMessage(message) ? message : loading ? "Loading…" : "");
+  const label = banner.querySelector(".header-status-label");
+  if (label && label.textContent !== text) label.textContent = text;
+  const spinner = banner.querySelector(".loading-spinner");
+  if (spinner) spinner.hidden = !(text === "Loading…" || text === "Reconnecting…" || text === "Connecting…");
+  banner.title = text === connectionStatus?.title ? connectionStatus.detail || text : text;
+  banner.hidden = !text;
+}
+document.addEventListener?.("beings-connection-status", event => {
+  connectionStatus = event.detail;
+  if (!connectionStatus && (isConnectionInterrupted(state.message) || isLoadingMessage(state.message))) {
+    state.message = "";
+  }
+  syncHeaderStatus();
+});
 function message(text) {
   state.message = text;
-  const node = document.querySelector("#engine-message");
-  if (node) node.textContent = isLoadingMessage(text) ? "" : text;
-  syncLoadingIndicators();
+  syncHeaderStatus();
 }
 function firstLaunch() {
   const storage = vmDashboard ? "Your virtual machine" : "This computer";
@@ -818,21 +866,24 @@ function savedPerson(person, packet = state.packet) {
 }
 const pendingAIContacts = new Set();
 const pendingPhoneContacts = new Set();
+const phoneRetryStates = new Map();
 const aiContactRetryKeys = new Map();
 export function contactLookupActions(person, packet) {
   const key = pendingPersonKey(packet?.company_key, person.prospect_key);
   const pending = pendingAIContacts.has(key);
   const findingPhone = pendingPhoneContacts.has(key);
+  const retry = phoneRetryStates.get(key);
+  const phoneLabel = retry === "available" ? "Try again · $0.045" : "Find phone";
   const named = person.prospect_key && packet?.candidate_id
     && person.name !== person.email && person.name !== person.phone;
   const needsPhone = !person.phone && !person.phone_lookup_blocked;
   const label = aiContactRetryKeys.has(key) ? "Search again with AI" : "Prospect with AI";
   const find = named && (!person.email || needsPhone)
-    ? button(pending ? "Searching web…" : `${label} · $0.20 max`, "find-contact-ai", `data-person-key="${esc(person.prospect_key)}" aria-label="${label} for email and phone for ${esc(person.name)}, $0.20 maximum" ${pending ? 'disabled aria-busy="true"' : findingPhone ? "disabled" : ""}`) : "";
-  const findPhone = named && needsPhone && packet?.email_lookup?.configured === true
+    ? button(pending ? "Searching web…" : label, "find-contact-ai", `data-person-key="${esc(person.prospect_key)}" aria-label="${label} for email and phone for ${esc(person.name)}, $0.20 maximum" ${pending ? 'disabled aria-busy="true"' : findingPhone ? "disabled" : ""}`) : "";
+  const findPhone = named && needsPhone && retry !== "used" && packet?.email_lookup?.configured === true
     && /^https?:\/\/(www\.)?linkedin\.com\/in\/[A-Za-z0-9._%~-]+\/?(?:[?#].*)?$/i.test(person.profile_url || "")
-    ? button(findingPhone ? "Checking work phone…" : "Find phone · $0.005 max", "find-contact-phone",
-      `data-person-key="${esc(person.prospect_key)}" aria-label="Find work phone for ${esc(person.name)}, $0.005 maximum" ${findingPhone ? 'disabled aria-busy="true"' : pending ? "disabled" : ""}`) : "";
+    ? button(findingPhone ? "Finding phone…" : phoneLabel, "find-contact-phone",
+      `data-person-key="${esc(person.prospect_key)}" aria-label="${phoneLabel} for ${esc(person.name)}" ${findingPhone ? 'disabled aria-busy="true"' : pending ? "disabled" : ""}`) : "";
   return {phone:findPhone, ai:find};
 }
 function contactActions(person) {
@@ -842,7 +893,7 @@ function contactActions(person) {
     ? button(saved ? "Saved" : "Save", "save-person",
       `data-person-key="${esc(person.prospect_key)}" aria-label="${saved ? "Saved" : "Save"} ${esc(person.name)}" ${saved?.pending ? 'aria-busy="true" title="Saving in background"' : ""} ${saved ? "disabled" : ""}`,
       "button primary") : "";
-  return `<div class="engine-contact-actions">${person.operator_supplied ? '<span class="muted">Saved</span>' : ""}${lookup.phone}${lookup.ai}${person.email ? `<button type="button" class="button" data-copy-email="${esc(person.email)}" aria-label="Copy ${esc(person.email)}">Copy email</button>` : ""}${person.phone && /^\+?[0-9]{7,15}$/.test(person.phone) ? `<a class="button" href="tel:${esc(person.phone)}" aria-label="Call ${esc(person.name)}">Call</a>` : ""}${save}</div>`;
+  return `<div class="engine-contact-actions">${lookup.ai}${save}</div>`;
 }
 function contactPeople(p) {
   const current = (p.contact_recommendations?.people || []).map(person => {
@@ -887,8 +938,13 @@ function prospectSources(person) {
 }
 function aiContactSources(person) {
   const publicPhone = person.public_work_phone;
+  const provider = {leadocean: "LeadOcean", blitzapi: "BlitzAPI", tomba: "Tomba"}[publicPhone?.provider];
+  const providerSourced = publicPhone?.source_kind === "licensed_professional_provider";
   const publicSource = publicPhone && publicPhone.value === person.phone
-    ? `<p>Work phone: ${link(publicPhone.source_url, "Company website ↗")}</p>` : "";
+    ? providerSourced
+      ? `<p>Phone source: ${esc(provider || "Prospecting provider")} · ${link(publicPhone.source_url, "Matched profile ↗")}</p>`
+      : `<p>Work phone: ${link(publicPhone.source_url, "Company website ↗")}</p>`
+    : "";
   return publicSource + ["email", "phone"].map(field => {
     const source = person.ai_contact?.[field];
     return source && source.value === person[field] ? `<p>${field === "email" ? "Work email" : "Work phone"}: ${link(source.source_url, "AI web search ↗")}${source.observed_at ? ` · ${date(source.observed_at)}` : ""}</p>` : "";
@@ -920,7 +976,7 @@ async function saveCompanyEmail(node) {
     const result = await api("/outbound/manual", {candidate_id:packet.candidate_id, email});
     rememberProspect(result, packet.company_key);
   } catch (error) {
-    if (callbacks.notify) callbacks.notify(error.message); else message(error.message);
+    if (callbacks.notify) callbacks.notify(error.message, "error"); else message(error.message);
   } finally {
     pendingEmailSaves.delete(key);
     if (state.packet?.company_key === packet.company_key) renderPacket();
@@ -989,6 +1045,43 @@ function scanDate(label, stamp) {
   return `<small class="muted">${label} <time datetime="${esc(stamp)}" title="${esc(checked.toLocaleString())}">${esc(checked.toLocaleDateString())}</time></small>`;
 }
 
+function contactTableRow(person) {
+  const lookup = contactLookupActions(person, state.packet);
+  const email = person.email
+    ? `<button type="button" class="text-button engine-email" data-copy-email="${esc(person.email)}" aria-label="Copy ${esc(person.email)}">${esc(person.email)}</button>`
+    : '<span class="muted">—</span>';
+  const phone = person.phone && /^\+?[0-9]{7,15}$/.test(person.phone)
+    ? `<a href="tel:${esc(person.phone)}" aria-label="Call ${esc(person.name)}">${esc(person.phone.replace(/^(?:\+1)?(\d{3})(\d{3})(\d{4})$/, "($1) $2-$3"))}</a>`
+    : person.phone ? esc(person.phone) : lookup.phone || '<span class="muted">—</span>';
+  return `<tr class="engine-contact">
+    <td><div class="engine-person-info"><strong>${esc(person.name)}</strong>
+      <span>${esc(person.title || "")}</span>
+</div></td>
+    <td>${person.profile_url ? link(person.profile_url, /^https?:\/\/(?:[a-z0-9-]+\.)?linkedin\.com\//i.test(person.profile_url) ? "LinkedIn ↗" : "Profile ↗") : '<span class="muted">—</span>'}</td>
+    <td><div class="engine-contact-email">${email}</div></td>
+    <td class="engine-contact-phone">${phone}</td>
+    <td>${contactActions(person)}</td>
+  </tr>`;
+}
+function contactsTable(people, loading, companyRow = "") {
+  if (!people.length && !companyRow) return `<p class="muted engine-contact-empty">${loading
+    ? "Contacts loading..." : "No named contacts yet."}</p>`;
+  return `<div class="engine-contacts-table-wrap" tabindex="0" role="region" aria-label="Company contacts">
+    <table class="engine-contacts-table"><colgroup><col><col><col><col><col></colgroup>
+      <thead><tr><th scope="col">Name</th><th scope="col">Profile</th><th scope="col">Email</th><th scope="col">Phone</th><th scope="col">Actions</th></tr></thead>
+      <tbody>${companyRow}${people.map(contactTableRow).join("")}</tbody>
+    </table></div>`;
+}
+function companyContactName(packet) {
+  const name = String(packet.company_name || "").trim();
+  const domain = String(packet.company_key || "");
+  const compact = value => value.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const stem = domain.replace(/^www\./i, "").split(".")[0];
+  // A generic page headline is not a verified company name.
+  const headline = /\b(?:agency|services|solutions|marketing|creative|leading|award.winning)\b/i.test(name)
+    && name.split(/\s+/).length >= 4 && !compact(name).includes(compact(stem));
+  return name && !headline ? name : domain;
+}
 function contactPanel(p) {
   const contacts = p.contact_recommendations || {people:[], company_contact:null};
   const people = contactPeople(p);
@@ -996,11 +1089,6 @@ function contactPanel(p) {
   const companyPhone = /^\+?[0-9]{7,15}$/.test(fallback?.phone || "") ? fallback.phone : "";
   const website = `https://${p.company_key}`;
   const contactRoute = fallback?.url && fallback.url.replace(/\/$/, "") !== website;
-  const lastRan = manualRunDate(p.email_lookup?.last_ran_at);
-  const checks = scanDate("Contact crawl", p.scan_dates?.contact_crawled_at)
-    + scanDate("People checked", p.scan_dates?.people_checked_at)
-    + (lastRan ? `<small class="muted">Last ran ${esc(lastRan)}</small>` : "");
-
   const emailMaximum = Math.ceil((p.email_lookup_estimate?.maximum_microusd ?? 50000) / 10000) / 100;
   const lookupStage = emailLookupStages.get(p.candidate_id);
   const treg = p.email_lookup?.configured === true && !p.email_lookup_estimate?.people_checked_without_candidates;
@@ -1012,10 +1100,17 @@ function contactPanel(p) {
   const lookupAttributes = `data-lookup-label="${esc(lookupLabel)}"`
     + (microlink ? ' title="Microlink uses your subscription allowance"' : "");
   const emailControl = `<div class="engine-email-control">${p.candidate_id && !p.summary_loading ? button("Input prospect", "add-prospect") : ""}${p.candidate_id && !p.summary_loading && (treg || microlink) ? button(lookupStage || lookupLabel, "emails", lookupAttributes, "button primary") : ""}</div>`;
-  const companyPhoneRow = companyPhone
-    ? `<div class="engine-company-contact"><span>Company phone</span><div class="engine-contact-actions"><a class="button" href="tel:${esc(companyPhone)}" aria-label="Call company at ${esc(companyPhone)}">${esc(companyPhone)}</a>${link(fallback.phone_source_url, "Source")}</div></div>`
-    : "";
-  return `<section class="engine-contacts" id="engine-contacts"><div class="panel-head"><h3>Contacts</h3><div class="engine-contact-header-end">${p.summary_loading ? loadingIcon("summary", "Loading contacts") : ""}${emailControl}</div></div>${people.map(person => `<article class="engine-contact"><div class="engine-person-info"><div class="engine-person-heading"><strong>${esc(person.name)}</strong>${person.profile_url ? link(person.profile_url, "Profile ↗") : ""}</div><span>${esc(person.title)}</span>${person.email ? `<span class="engine-email">${esc(person.email)}</span>` : ""}${person.phone ? `<span class="engine-email">${esc(person.phone)}</span>` : ""}<details class="engine-person-source"><summary>Source</summary><p>${person.operator_supplied ? "Added by you" : person.source_kind === "licensed_professional_provider" ? "Professional data" : person.source_url ? "Company website" : "Saved contact"}${person.observed_at ? ` · ${date(person.observed_at)}` : ""}</p>${prospectSources(person)}</details></div>${contactActions(person)}</article>`).join("") || `<p class="muted engine-contact-empty">${p.summary_loading ? (isLoading("summary") ? "Loading contacts…" : "Contacts loading...") : "No named contacts yet."}</p>`}${fallback && (fallback.email || contactRoute) ? `<div class="engine-company-contact"><span>${esc(fallback.email || fallback.label)}</span><div class="engine-contact-actions">${fallback.email && p.candidate_id ? button(savedEmail(fallback.email, p) ? "Update" : pendingEmailSaves.has(`${p.company_key}:${fallback.email.toLowerCase()}`) ? "Saving…" : "Save prospect", "save-company-email", pendingEmailSaves.has(`${p.company_key}:${fallback.email.toLowerCase()}`) ? "disabled" : "") : ""}${fallback.email ? `<button type="button" class="button" data-copy-email="${esc(fallback.email)}" aria-label="Copy ${esc(fallback.email)}">Copy email</button>` : ""}${contactRoute ? link(fallback.url, "Contact page ↗") : ""}${link(fallback.source_url, "Source")}</div></div>` : ""}${companyPhoneRow}${checks ? `<div class="engine-scan-dates">${checks}</div>` : ""}</section>`;
+  const phoneLabel = companyPhone.replace(/^(?:\+1)?(\d{3})(\d{3})(\d{4})$/, "($1) $2-$3");
+  const emailSaving = fallback?.email && pendingEmailSaves.has(`${p.company_key}:${fallback.email.toLowerCase()}`);
+  const companyRow = fallback && (fallback.email || contactRoute || companyPhone)
+    ? `<tr class="engine-contact engine-company-contact-row">
+      <td><div class="engine-person-info"><strong>${esc(companyContactName(p))}</strong><span>Company contact</span></div></td>
+      <td>${contactRoute ? link(fallback.url, "Visit ↗") : '<span class="muted">—</span>'}</td>
+      <td><div class="engine-contact-email">${fallback.email ? `<button type="button" class="text-button engine-email" data-copy-email="${esc(fallback.email)}" aria-label="Copy ${esc(fallback.email)}">${esc(fallback.email)}</button>` : '<span class="muted">—</span>'}</div></td>
+      <td class="engine-contact-phone">${companyPhone ? `<a href="tel:${esc(companyPhone)}" aria-label="Call company at ${esc(phoneLabel)}">${esc(phoneLabel)}</a>` : '<span class="muted">—</span>'}</td>
+      <td><div class="engine-contact-actions">${fallback.email && p.candidate_id ? button(emailSaving ? "Saving…" : savedEmail(fallback.email, p) ? "Update" : "Save prospect", "save-company-email", emailSaving ? 'disabled aria-busy="true"' : "", "button primary") : ""}</div></td>
+    </tr>` : "";
+  return `<section class="engine-contacts" id="engine-contacts"><div class="panel-head"><h3>Contacts</h3><div class="engine-contact-header-end">${p.summary_loading ? loadingIcon("summary", "Loading contacts") : ""}${emailControl}</div></div>${contactsTable(people, p.summary_loading, companyRow)}</section>`;
 }
 
 function scoreBreakdown(p) {
@@ -1043,10 +1138,10 @@ function openScoreBreakdown(summary) {
   dialog.setAttribute("aria-labelledby", "engine-score-breakdown-title engine-score-breakdown-company");
   dialog.innerHTML = `<header class="modal-head">
     <div>
-      <h2 id="engine-score-breakdown-title">Score breakdown</h2>
+      <h2 id="engine-score-breakdown-title" tabindex="-1" autofocus>Score breakdown</h2>
       <p id="engine-score-breakdown-company">${esc(summary.company_name)}</p>
     </div>
-    <form method="dialog"><button type="submit" class="icon-button" aria-label="Close" autofocus>×</button></form>
+    <form method="dialog"><button type="submit" class="icon-button" aria-label="Close">×</button></form>
   </header><div class="modal-body">${scoreBreakdown(summary)}</div>`;
   dialog.addEventListener("close", () => {
     dialog.remove();
@@ -1078,8 +1173,16 @@ function companyHeading(p) {
 }
 function lead(p) {
   const tags = companyTagControls(p);
+  const lastRan = manualRunDate(p.email_lookup?.last_ran_at);
+  const checks = [
+    scanDate("Contact crawl", p.scan_dates?.contact_crawled_at),
+    scanDate("People checked", p.scan_dates?.people_checked_at),
+    lastRan ? `<small class="muted">Last ran ${esc(lastRan)}</small>` : "",
+  ].filter(Boolean);
+  const dates = checks.map((check, index) =>
+    `<span>${index ? '<span aria-hidden="true">&#8226;</span>' : ""}${check}</span>`).join("");
   return `<section class="panel engine-card engine-lead">${contactPanel(p)}
-    ${tags ? `<div class="engine-company-controls">${tags}</div>` : ""}
+    ${tags || dates ? `<div class="engine-company-controls">${tags}${dates ? `<div class="engine-scan-dates">${dates}</div>` : ""}</div>` : ""}
   </section>`;
 }
 function companyStar(p) {
@@ -1147,7 +1250,7 @@ async function changeCompanyTag(tag, action) {
       const revision = overviewNumber;
       void api("/api/tags").then(data => {
         if (revision !== overviewNumber || !active) return;
-        companyTags = data.items || []; renderList();
+        companyTags = data.items || []; renderList(true);
       }).catch(missionError);
     }
   }
@@ -1165,7 +1268,7 @@ function render() {
   const root = document.querySelector("#view-sales");
   const summary = safeSummary(state.packet);
   const dialog = document.querySelector("#engine-mission-dialog") ? "" : `<dialog id="engine-mission-dialog" class="modal engine-mission-dialog" aria-labelledby="engine-mission-dialog-title"></dialog>`;
-  root.innerHTML = `${dialog}<p id="engine-message" role="status">${isLoadingMessage(state.message) ? "" : esc(state.message)}</p><div class="engine-layout"><div id="engine-list">${state.tab === "pipeline" ? pipeline() : queue()}</div>${paneDivider("engine-list", "Resize company list", "vertical")}
+  root.innerHTML = `${dialog}<div class="engine-layout"><div id="engine-list">${state.tab === "pipeline" ? pipeline() : queue()}</div>${paneDivider("engine-list", "Resize company list", "vertical")}
     <div class="engine-company-workspace">
       <div id="engine-company-header">${summary ? companyHeading(summary) : ""}</div>
       <section id="engine-website" aria-label="Company website viewer"></section>
@@ -1377,23 +1480,39 @@ let contactScrollFrame;
 
 function scrollToContacts() {
   cancelAnimationFrame(contactScrollFrame);
-  const contacts = document.querySelector("#engine-contacts");
-  if (!contacts) return;
-  const pane = contacts.closest(".engine-company-workspace");
+  const card = document.querySelector("#engine-contacts")?.closest(".engine-lead");
+  if (!card) return;
+  const pane = card.closest(".engine-company-workspace");
   const scroller = getComputedStyle(pane).overflowY === "auto"
-    ? pane : contacts.closest("#view-sales");
+    ? pane : card.closest("#view-sales");
+  const selection = selectedKey;
   const start = scroller.scrollTop;
-  const offset = contacts.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
-  const inset = scroller === pane ? pane.clientTop : 24;
-  const end = Math.max(0, Math.min(start + offset - inset, scroller.scrollHeight - scroller.clientHeight));
+  const targetScrollTop = () => {
+    const currentCard = document.querySelector("#engine-contacts")?.closest(".engine-lead");
+    if (!currentCard || !scroller.contains(currentCard)) return null;
+    const header = document.querySelector("#engine-company-header");
+    const headerBounds = header?.getBoundingClientRect();
+    const scrollTopEdge = scroller.getBoundingClientRect().top + scroller.clientTop;
+    const pinnedBottom = headerBounds && headerBounds.top <= scrollTopEdge + 24
+      ? headerBounds.bottom : 0;
+    const top = Math.max(scrollTopEdge + (headerBounds?.height || 0), pinnedBottom) + 12;
+    const end = scroller.scrollTop + currentCard.getBoundingClientRect().top - top;
+    return Math.max(0, Math.min(end, scroller.scrollHeight - scroller.clientHeight));
+  };
+  const end = targetScrollTop();
+  if (end === null) return;
   if (matchMedia("(prefers-reduced-motion: reduce)").matches || Math.abs(end - start) < 1) {
     scroller.scrollTop = end;
+    // Re-measure after sticky positioning settles, including the mobile scroll inset.
+    scroller.scrollTop = targetScrollTop() ?? end;
     return;
   }
   const startedAt = performance.now();
   let previous = start;
   function animate(now) {
-    if (!contacts.isConnected || Math.abs(scroller.scrollTop - previous) > 1) return;
+    if (selectedKey !== selection || Math.abs(scroller.scrollTop - previous) > 1) return;
+    const end = targetScrollTop();
+    if (end === null) return;
     const progress = Math.min(1, (now - startedAt) / 400);
     const eased = progress * progress * (3 - 2 * progress);
     scroller.scrollTop = start + (end - start) * eased;
@@ -1409,14 +1528,15 @@ export async function runContactLookup(action, packet, person) {
   const phone = action === "find-contact-phone";
   if (phone && (person.phone || person.phone_lookup_blocked)) return;
   const key = pendingPersonKey(packet.company_key, person.prospect_key);
-  if (pendingAIContacts.has(key) || pendingPhoneContacts.has(key)) return;
+  if (pendingAIContacts.has(key) || pendingPhoneContacts.has(key)
+      || (phone && phoneRetryStates.get(key) === "used")) return;
   const pending = phone ? pendingPhoneContacts : pendingAIContacts;
   const refreshActions = () => {
     if (state.packet?.company_key === packet.company_key) renderPacket();
     callbacks.contactLookupChanged?.();
   };
-  const notify = text => {
-    if (callbacks.notify) callbacks.notify(text);
+  const notify = (text, tone) => {
+    if (callbacks.notify) callbacks.notify(text, tone);
     else if (state.packet?.company_key === packet.company_key) message(text);
   };
   pending.add(key);
@@ -1424,13 +1544,19 @@ export async function runContactLookup(action, packet, person) {
   try {
     const result = await api(`/companies/${packet.candidate_id}/contacts/${phone ? "find-phone" : "find-with-ai"}`, {
       person_key:person.prospect_key, mission_id:missionId,
-      confirmed_maximum_microusd:phone ? 5000 : 200000,
+      ...(!phone ? {confirmed_maximum_microusd:200000}
+        : phoneRetryStates.get(key) === "available" ? {manual_retry:true} : {}),
       ...(!phone && aiContactRetryKeys.has(key) ? {retry_cache_key:aiContactRetryKeys.get(key)} : {}),
     });
     if (result.contact) rememberProspect(result.contact, packet.company_key);
     if (phone) {
-      const outcome = result.found ? "Public work phone saved" : "No public work phone confirmed";
-      notify(result.cached ? `${outcome} · Cached lookup` : outcome);
+      if (result.retry_used) phoneRetryStates.set(key, "used");
+      else if (result.retry_available) phoneRetryStates.set(key, "available");
+      const outcome = result.found ? "Phone number saved" : "No phone number found";
+      const cost = Number.isFinite(result.cost_microusd)
+        ? `$${(result.cost_microusd / 1_000_000).toFixed(6).replace(/0{1,4}$/, "")}` : "";
+      const details = [outcome, result.cached ? "Cached lookup" : "", cost ? `${cost} charged` : ""];
+      notify(details.filter(Boolean).join(" · "), result.found ? "success" : "info");
     } else {
       if (result.cache_key) aiContactRetryKeys.set(key, result.cache_key);
       const confirmed = result.search?.completed_searches > 0;
@@ -1439,10 +1565,10 @@ export async function runContactLookup(action, packet, person) {
         ? `${result.cached ? "Cached incomplete research (no new charge)" : "Research ended early"} · use Search again to continue`
         : confirmed ? `${source} · ${result.found ? "contact details saved" : "no public work contact details found"}`
         : result.found ? "Contact details saved" : "Web search completion unconfirmed; no contact details saved";
-      notify(notice);
+      notify(notice, result.found ? "success" : result.search?.research_complete === false ? "error" : "info");
     }
   } catch (error) {
-    notify(error.message);
+    notify(error.message, "error");
   } finally {
     pending.delete(key);
     refreshActions();
@@ -1507,7 +1633,7 @@ async function handleClick(node) {
       node.removeAttribute?.("aria-busy");
       if (state.packet?.company_key === packet.company_key) renderPacket();
       const failure = `Could not save ${person.name}: ${error.message}`;
-      if (callbacks.notify) callbacks.notify(failure);
+      if (callbacks.notify) callbacks.notify(failure, "error");
       else message(failure);
     }
     return;
@@ -1579,8 +1705,8 @@ async function handleClick(node) {
       emailLookupStages.set(p.candidate_id, label);
       syncContactLookupButton();
     };
-    const notify = text => {
-      if (callbacks.notify) callbacks.notify(text);
+    const notify = (text, tone) => {
+      if (callbacks.notify) callbacks.notify(text, tone);
       else if (state.packet?.candidate_id === p.candidate_id) message(text);
     };
     updateStage("Starting…");
@@ -1590,7 +1716,7 @@ async function handleClick(node) {
       const microlinkRequests = p.email_lookup?.microlink_configured
         ? estimate.microlink_max_requests : 0;
       if (!maximum && !microlinkRequests) {
-        notify("No contact search is due.");
+        notify("No contact search is due.", "info");
         return;
       }
       updateStage(microlinkRequests ? "Searching contacts…" : estimate.needs_people_scan ? "Scanning people…" : "Finding emails…");
@@ -1598,7 +1724,7 @@ async function handleClick(node) {
       if (state.packet?.candidate_id === p.candidate_id) await loadSalesWorkbench({invalidate:true});
       notify(result.message);
     } catch (error) {
-      if (!cancelled(error)) notify(`Could not find contacts. ${error.message}`);
+      if (!cancelled(error)) notify(`Could not find contacts. ${error.message}`, "error");
     } finally {
       emailLookupStages.delete(p.candidate_id);
       syncContactLookupButton();
@@ -1626,7 +1752,7 @@ export async function loadSalesWorkbench({invalidate = false, refreshSummary = t
   }
   if (!background) api("/api/tags").then(data => {
     if (refresh !== overviewNumber || !active) return;
-    companyTags = data.items || []; renderList();
+    companyTags = data.items || []; renderList(true);
   }).catch(error => { if (refresh === overviewNumber) message(error.message); });
   const path = missionPath(tab === "pipeline"
     ? `/pipeline?compact=true&search=${encodeURIComponent(state.search)}&stage=${encodeURIComponent(pipelineStage)}${selectedTag ? `&tag=${encodeURIComponent(selectedTag)}` : ""}&offset=${listOffset}&limit=${pageSize}`
@@ -1656,6 +1782,7 @@ export async function loadSalesWorkbench({invalidate = false, refreshSummary = t
         return;
       }
       if (tab === "pipeline") pipelineData = value; else state.overview = value;
+      if (isConnectionInterrupted(state.message) || isLoadingMessage(state.message)) message("");
       observeRankingProgress(value);
       if (value.compilation) missions=missions.map(m=>m.id===missionId ? {...m,compilation:value.compilation} : m);
       renderList(background); armExpiry();

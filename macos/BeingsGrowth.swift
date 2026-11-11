@@ -596,9 +596,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var dashboardHasLoaded = false
     private var dashboardContentLost = false
     private var missedHealthChecks = 0
-    private var connectionNotice: NSView?
-    private var connectionNoticeLabel: NSTextField?
-    private var connectionNoticeRevision = 0
     private var connectionNoticeShowing = false
     private var statusTitle: NSTextField?
     private var statusDetail: NSTextField?
@@ -1109,11 +1106,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private func hideConnectionNotice() {
         guard connectionNoticeShowing else { return }
         connectionNoticeShowing = false
-        connectionNoticeRevision += 1
-        connectionNotice?.isHidden = true
         if let webView, trustedDashboard(webView.url) {
             webView.evaluateJavaScript("""
-                document.getElementById('connection-notice')?.remove();
+                document.dispatchEvent(new CustomEvent('beings-connection-status', {detail: null}));
                 window.dispatchEvent(new CustomEvent('beings-website-reconnect', {detail: false}));
                 """, completionHandler: nil)
         }
@@ -1121,70 +1116,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     private func showConnectionStatus(_ title: String, detail: String = "") {
         companyWebsite?.container.isHidden = true
-        if dashboardHasLoaded, let webView {
+        if dashboardHasLoaded, !dashboardContentLost, let webView, trustedDashboard(webView.url) {
             connectionNoticeShowing = true
-            connectionNoticeRevision += 1
-            let revision = connectionNoticeRevision
-            if !dashboardContentLost, trustedDashboard(webView.url) {
-                webView.callAsyncJavaScript("""
-                    window.dispatchEvent(new CustomEvent('beings-website-reconnect', {detail: true}));
-                    const footer = document.querySelector('.sidebar-foot');
-                    if (!footer?.getClientRects().length) return false;
-                    let pill = document.getElementById('connection-notice');
-                    if (!pill) {
-                        pill = document.createElement('span');
-                        pill.id = 'connection-notice';
-                        pill.setAttribute('role', 'status');
-                    }
-                    if (pill.nextElementSibling !== footer) footer.before(pill);
-                    if (pill.textContent !== title) pill.textContent = title;
-                    pill.title = detail;
-                    return true;
-                    """, arguments: ["title": title, "detail": detail], in: nil, in: .page) { [weak self, weak webView] result in
-                    guard let self, let webView, self.connectionNoticeRevision == revision else { return }
-                    if case .success(let value) = result, value as? Bool == true {
-                        self.connectionNotice?.isHidden = true
-                    } else {
-                        self.showNativeConnectionNotice(in: webView, title: title, detail: detail)
-                    }
-                }
-            } else {
-                showNativeConnectionNotice(in: webView, title: title, detail: detail)
-            }
+            webView.callAsyncJavaScript("""
+                document.dispatchEvent(new CustomEvent('beings-connection-status', {detail: {title, detail}}));
+                window.dispatchEvent(new CustomEvent('beings-website-reconnect', {detail: true}));
+                """, arguments: ["title": title, "detail": detail], in: nil, in: .page,
+                completionHandler: nil)
             return
         }
         showInitialConnectionStatus(title, detail: detail)
-    }
-
-    private func showNativeConnectionNotice(in webView: WKWebView, title: String, detail: String) {
-        if connectionNotice == nil {
-            let notice = NSView()
-            let label = NSTextField(labelWithString: "")
-            label.font = .systemFont(ofSize: 13, weight: .semibold)
-            label.textColor = NSColor(srgbRed: 0.91, green: 0.95, blue: 1, alpha: 1)
-            label.translatesAutoresizingMaskIntoConstraints = false
-            notice.wantsLayer = true
-            notice.layer?.backgroundColor = NSColor(srgbRed: 0.11, green: 0.17, blue: 0.26, alpha: 1).cgColor
-            notice.layer?.borderColor = NSColor(srgbRed: 0.39, green: 0.56, blue: 0.80, alpha: 1).cgColor
-            notice.layer?.borderWidth = 1
-            notice.layer?.cornerRadius = 16
-            notice.translatesAutoresizingMaskIntoConstraints = false
-            notice.addSubview(label)
-            webView.addSubview(notice, positioned: .above, relativeTo: nil)
-            NSLayoutConstraint.activate([
-                notice.centerXAnchor.constraint(equalTo: webView.safeAreaLayoutGuide.centerXAnchor),
-                notice.topAnchor.constraint(equalTo: webView.safeAreaLayoutGuide.topAnchor, constant: 16),
-                label.leadingAnchor.constraint(equalTo: notice.leadingAnchor, constant: 14),
-                label.trailingAnchor.constraint(equalTo: notice.trailingAnchor, constant: -14),
-                label.topAnchor.constraint(equalTo: notice.topAnchor, constant: 8),
-                label.bottomAnchor.constraint(equalTo: notice.bottomAnchor, constant: -8),
-            ])
-            connectionNotice = notice
-            connectionNoticeLabel = label
-        }
-        connectionNoticeLabel?.stringValue = title
-        connectionNotice?.toolTip = detail.isEmpty ? nil : detail
-        connectionNotice?.isHidden = false
     }
 
     private func showInitialConnectionStatus(_ title: String, detail: String) {
@@ -1294,7 +1235,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         view.underPageBackgroundColor = dashboardBackground
         view.navigationDelegate = self
         view.uiDelegate = self
-        view.allowsBackForwardNavigationGestures = true
+        // The dashboard is an app surface, not a swipe-navigable browser.
+        view.allowsBackForwardNavigationGestures = false
 
         let visibleFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let frame = NSRect(

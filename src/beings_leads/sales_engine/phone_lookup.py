@@ -1,4 +1,4 @@
-"""Explicit LeadOcean lookup with first-party proof for a named work number."""
+"""Bounded prospect phone lookup with first-party and provider provenance."""
 
 import asyncio
 import hashlib
@@ -22,8 +22,13 @@ from .contacts import FRESH_DAYS, _contact_route, _url
 from .models import BudgetReservationRequest
 from .summaries import _identity
 
-MAXIMUM_MICROUSD = 5_000
-ENDPOINT = "leadocean.people.phone.find"
+PROVIDERS = (
+    ("leadocean", "GET", "leadocean.people.phone.find", 5_000),
+    ("blitzapi", "POST", "blitzapi.people.phone.find", 495),
+)
+MANUAL_PROVIDER = ("tomba", "GET", "tomba.people.phone.find", 44_500)
+EXPECTED_CHAIN_MICROUSD = sum(provider[3] for provider in PROVIDERS)
+RETRY_DELAY = timedelta(minutes=5)
 VERSION = "treg-public-work-phone-v1"
 
 
@@ -128,46 +133,106 @@ async def _corroborate(client, packet, person, candidates):
                     and not response.extensions.get("beings_body_truncated")
                     and (phone := _published_work_phone(body, person, candidates,
                                                        str(response.url)))):
-                return {"value": phone, "source_url": str(response.url), "provider": "leadocean"}
+                return {"value": phone, "source_url": str(response.url)}
         except (httpx.HTTPError, TimeoutError, ValueError, OSError):
             continue
     return None
 
 
-async def _candidates(client, repo, reservation, profile, credentials):
-    headers = {"X-Treg-Token": credentials.token, "Idempotency-Key": reservation,
+def _parse_candidates(payload, provider):
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data", payload)
+    if provider == "tomba":
+        if not isinstance(data, dict):
+            return set() if data is None else None
+        phone = _dial(data.get("e164_format"))
+        return {phone} if phone and phone.startswith("+") and data.get("valid") else set()
+    if not isinstance(data, dict) or not isinstance(data.get("found"), bool):
+        return None
+    if not data["found"]:
+        return set()
+    if provider == "blitzapi":
+        phone = _dial(data.get("phone"))
+        return {phone} if phone and phone.startswith("+1") else set()
+    rows = data.get("phones") or [data.get("best")]
+    if not isinstance(rows, list):
+        return None
+    return {phone for row in rows if isinstance(row, dict)
+            and row.get("type") in ("direct", "office")
+            and (phone := _dial(row.get("phone"))) and phone.startswith("+")}
+
+
+async def _candidates(client, provider, method, endpoint, reservation, profile, credentials):
+    headers = {"X-Treg-Token": credentials.token, "Idempotency-Key": f"{reservation}:{provider}",
                "X-Treg-Client": "beings-growth",
                "X-Treg-Meta": "workspace=beings-growth,workflow=work-phone-lookup"}
     if credentials.org:
         headers["X-Treg-Org"] = credentials.org
+    profile_parameter = "linkedin" if provider == "tomba" else "linkedin_url"
+    inputs = ({"params": {profile_parameter: profile}} if method == "GET"
+              else {"json": {"person_linkedin_url": profile}})
     try:
         response = await provider_request(
-            client, "GET", f"{credentials.base_url}/call/{ENDPOINT}",
-            params={"linkedin_url": profile}, headers=headers,
+            client, method, f"{credentials.base_url}/call/{endpoint}", headers=headers, **inputs,
         )
-    except Exception as exc:
+    except httpx.HTTPError as exc:
         if is_local_rate_deferral(exc):
-            repo.settle_budget(reservation, 0)
-            raise ValueError("Phone lookup is temporarily rate limited") from exc
+            return None, 0, None
         raise
+    if response.extensions.get("beings_request_deferred"):
+        return None, 0, None
     if response.status_code == 202:
         raise RuntimeError("Phone lookup charge is pending")
     cost = TregPeopleClient._charged(response.headers)
-    repo.settle_budget(reservation, cost)
+    call_id = response.headers.get("X-Treg-Call-Id")
     if response.status_code == 404 and cost == 0:
-        return set(), response.headers.get("X-Treg-Call-Id")
-    response.raise_for_status()
-    data = response.json().get("data")
-    if not isinstance(data, dict) or not isinstance(data.get("found"), bool):
-        raise RuntimeError("Unexpected phone lookup response")
-    rows = data.get("phones") or [data.get("best")]
-    numbers = {phone for row in rows if isinstance(row, dict)
-               and row.get("type") in ("direct", "office")
-               and (phone := _dial(row.get("phone"))) and phone.startswith("+")}
-    return numbers if data["found"] else set(), response.headers.get("X-Treg-Call-Id")
+        return set(), cost, call_id
+    if not response.is_success:
+        return None, cost, call_id
+    try:
+        return _parse_candidates(response.json(), provider), cost, call_id
+    except ValueError:
+        return None, cost, call_id
 
 
-async def find_phone(repo, packet, key):
+async def _provider_fallback(
+    client, packet, person, profile, credentials, reservation, legacy_cap, manual_retry,
+):
+    providers = (MANUAL_PROVIDER,) if manual_retry else PROVIDERS
+    reserved_cost = MANUAL_PROVIDER[3] if manual_retry else (
+        legacy_cap if legacy_cap is not None else EXPECTED_CHAIN_MICROUSD
+    )
+    attempts = []
+    spent = 0
+    phone = None
+    complete = True
+    for provider, method, endpoint, limit in providers:
+        if legacy_cap is not None and spent + limit > legacy_cap:
+            continue
+        numbers, cost, call_id = await _candidates(
+            client, provider, method, endpoint, reservation, profile, credentials,
+        )
+        spent += cost
+        if spent > reserved_cost:
+            raise RuntimeError("Phone lookup charge exceeded its budget reservation")
+        attempts.append({"provider": provider, "call_id": call_id, "cost_microusd": cost})
+        if numbers is None:
+            complete = False
+        elif numbers:
+            phone = await _corroborate(client, packet, person, numbers)
+            if phone is None and len(numbers) == 1 and (manual_retry or legacy_cap != 5_000):
+                phone = {"value": next(iter(numbers)), "source_url": profile,
+                         "source_kind": "licensed_professional_provider"}
+            if phone:
+                phone["provider"] = provider
+                return phone, spent, attempts, True
+    return phone, spent, attempts, complete
+
+
+async def find_phone(repo, packet, key, legacy_cap=None, *, manual_retry=False):
+    if manual_retry and legacy_cap is not None:
+        raise ValueError("Refresh the dashboard before trying Tomba")
     company = packet["company_key"]
     require_allowed(company)
     person = resolve_person(repo.connection, packet, key)
@@ -175,7 +240,7 @@ async def find_phone(repo, packet, key):
     if not profile:
         raise ValueError("A LinkedIn profile is needed for this phone lookup")
     if person.get("phone") or person.get("phone_lookup_blocked"):
-        return {"contact": None, "found": False, "cached": True}
+        return {"contact": None, "found": False, "cached": True, "cost_microusd": 0}
     identity = (person["name"], person.get("profile_url"))
     identity_key = hashlib.sha256(
         json.dumps([VERSION, company, key, *identity]).encode()
@@ -185,10 +250,27 @@ async def find_phone(repo, packet, key):
         "WHERE identity_key=? ORDER BY observed_at DESC,cache_key DESC LIMIT 1", (identity_key,),
     ).fetchone()
     now = datetime.now(UTC)
-    reused = cached is not None and datetime.fromisoformat(cached["observed_at"]) > (
-        now - timedelta(days=FRESH_DAYS))
+    cached_data = json.loads(cached["payload_json"]) if cached else {}
+    complete = cached_data.get("complete", True)
+    first_stage_cost = legacy_cap if legacy_cap is not None else EXPECTED_CHAIN_MICROUSD
+    reserved_cost = MANUAL_PROVIDER[3] if manual_retry else first_stage_cost
+    expanded = cached_data.get("maximum_microusd", 5_000) < first_stage_cost
+    spent = 0
+    age_limit = timedelta(days=FRESH_DAYS) if complete else RETRY_DELAY
+    fresh = bool(cached and datetime.fromisoformat(cached["observed_at"]) > now - age_limit)
+    retry_used = fresh and cached_data.get("manual_retry", False)
+    retry_available = (
+        fresh and not retry_used and not cached_data.get("phone")
+        and {attempt["provider"] for attempt in cached_data.get("attempts", [])}
+        == {provider[0] for provider in PROVIDERS}
+    )
+    if manual_retry and not (retry_available or retry_used):
+        raise ValueError("Run Find phone before trying Tomba")
+    reused = bool(fresh and (
+        retry_used or cached_data.get("phone") or (not manual_retry and not expanded)
+    ))
     if reused:
-        phone = json.loads(cached["payload_json"])["phone"]
+        phone = cached_data["phone"]
         stamp = cached["observed_at"]
     else:
         credentials = resolve_treg_credentials()
@@ -199,14 +281,18 @@ async def find_phone(repo, packet, key):
         reservation = "work-phone:" + cache_key
         reserved = repo.reserve_budget(BudgetReservationRequest(
             idempotency_key=reservation, company_key=company, provider="treg",
-            purpose="Public work phone lookup", maximum_microusd=MAXIMUM_MICROUSD,
+            purpose="Public work phone lookup", maximum_microusd=reserved_cost,
         ))
         if not reserved["created"]:
             raise ValueError("A phone lookup already ran or is awaiting confirmation")
         timeout = httpx.Timeout(15, connect=6)
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-            candidates, call_id = await _candidates(client, repo, reservation, profile, credentials)
-            phone = await _corroborate(client, packet, person, candidates) if candidates else None
+            phone, spent, attempts, complete = await _provider_fallback(
+                client, packet, person, profile, credentials, reservation, legacy_cap, manual_retry,
+            )
+        repo.settle_budget(reservation, spent)
+        retry_used = manual_retry
+        retry_available = not manual_retry and not phone and len(attempts) == len(PROVIDERS)
         stamp = datetime.now(UTC).isoformat()
         repo.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -219,7 +305,9 @@ async def find_phone(repo, packet, key):
                 "INSERT INTO engine_contact_lookups "
                 "(cache_key,candidate_id,payload_json,observed_at,identity_key) VALUES(?,?,?,?,?)",
                 (cache_key, packet["candidate_id"],
-                 json.dumps({"phone": phone, "call_id": call_id}), stamp, identity_key),
+                 json.dumps({"phone": phone, "attempts": attempts, "complete": complete,
+                             "maximum_microusd": reserved_cost, "manual_retry": manual_retry}),
+                 stamp, identity_key),
             )
             repo.connection.commit()
         except BaseException:
@@ -229,4 +317,7 @@ async def find_phone(repo, packet, key):
                                           observed_at=stamp, expected_identity=identity)
                if phone else None)
     found = bool(contact and phone and contact["phone"] == phone["value"])
-    return {"contact": contact, "found": found, "cached": reused}
+    if not complete and not retry_available:
+        raise ValueError("Phone lookup could not complete. Try again in a few minutes.")
+    return {"contact": contact, "found": found, "cached": reused, "cost_microusd": spent,
+            "retry_available": retry_available, "retry_used": retry_used}

@@ -1,4 +1,4 @@
-import { contactLookupActions, runContactLookup, openManualProspect, loadSalesWorkbench, openSalesCompany, browseCompanyKey, compilationErrorText, configureSalesWorkbench, loadSalesMissions, needsSalesMission, setSalesMode, salesMode, searchSalesWorkbench, salesSearch, deactivateSalesWorkbench, invalidateSalesWorkbench, updateFirstLaunchKey, VM_SETUP_GUIDE } from "./sales-engine.js?v=20261110-profile-by-name";
+import { captureSalesLocation, restoreSalesLocation, restoreSalesScroll, contactLookupActions, runContactLookup, openManualProspect, loadSalesWorkbench, openSalesCompany, browseCompanyKey, compilationErrorText, configureSalesWorkbench, loadSalesMissions, needsSalesMission, setSalesMode, salesMode, searchSalesWorkbench, salesSearch, deactivateSalesWorkbench, invalidateSalesWorkbench, updateFirstLaunchKey, VM_SETUP_GUIDE } from "./sales-engine.js?v=20261110-contacts-table";
 import { installScanPaneDivider } from "./company-website.js?v=11";
 const state = {
   dashboard: null,
@@ -52,6 +52,7 @@ const state = {
   smartScanFailureSkipEnabled: false,
   smartScanFailureRate: 75,
   smartScanControlsInitialized: false,
+  smartScanPreset: "basic",
   smartScanPollTimer: null,
   smartScanPollInFlight: false,
   smartScanElapsedTimer: null,
@@ -85,7 +86,6 @@ const state = {
   adDiscoveryPollTimer: null,
   adDiscoveryPollInFlight: false,
   adDiscoveryStarting: false,
-  adDiscoveryEstimating: false,
   adDiscoveryLinkFilter: "all",
   discoveryTab: "web_ct",
   discoveryMethods: null,
@@ -151,6 +151,10 @@ const SOURCE_SORT_COLUMNS = [
   { key: "scan_failure_rate", label: "Avg. failure", type: "number" },
   { key: "backlog", label: "Backlog", type: "number" },
   { key: "enabled", label: "Web & CT status", type: "boolean" },
+];
+const SCAN_SECTION_LINKS = [
+  ["smart-scan-due-hydration", "Company refresh"],
+  ["smart-scan-skip-failures", "Failure filtering"],
 ];
 const DISCOVERY_TAB_DEFINITIONS = [
   { id: "web_ct", label: "Web & CT", source_kinds: [], kind: "web" },
@@ -238,7 +242,8 @@ function scanActionBlocked(control) {
 }
 
 function smartScanLaunchBlocked(scan = state.smartScan) {
-  return !scan || state.smartScanLoading || Boolean(scanLaunchConflict("smart", scan));
+  return !scan || state.smartScanLoading || state.smartScanGoalPending
+    || Boolean(scanLaunchConflict("smart", scan));
 }
 
 function scanLaunchConflict(mode, scan = state.smartScan) {
@@ -369,7 +374,7 @@ async function copyText(value) {
 }
 
 async function api(path, options = {}) {
-  const { headers = {}, ...requestOptions } = options;
+  const { headers = {}, invalidateWorkbench = true, ...requestOptions } = options;
   const cache = requestOptions.cache ?? (requestOptions.method ? undefined : "no-store");
   const response = await fetch(path, { ...requestOptions, cache, headers: { "Content-Type": "application/json", ...headers } });
   if (!response.ok) {
@@ -379,17 +384,99 @@ async function api(path, options = {}) {
       : payload.detail;
     throw new Error(detail || `Request failed (${response.status})`);
   }
-  if (requestOptions.method && !["GET", "HEAD"].includes(requestOptions.method.toUpperCase())) invalidateSalesWorkbench();
+  if (invalidateWorkbench && requestOptions.method && !["GET", "HEAD"].includes(requestOptions.method.toUpperCase())) invalidateSalesWorkbench();
   if (response.status === 204) return null;
   return response.json();
 }
 
-function showToast(message) {
+const scanEstimateRefresh = new WeakMap();
+
+function bindAutomaticScanEstimate(form, estimate, clearQuote) {
+  const status = document.createElement("p");
+  status.className = "form-note scan-auto-estimate-status";
+  status.setAttribute("role", "status");
+  status.hidden = true;
+  form.append(status);
+  let timer;
+  let controller;
+  let lastDraft;
+  const draftKey = () => JSON.stringify([selectedScanMission(), [...new FormData(form)]]);
+  function refresh(event) {
+    if (scanControlLocks.has(form)) return;
+    if (event && draftKey() === lastDraft) return;
+    clearTimeout(timer);
+    controller?.abort();
+    clearQuote();
+    lastDraft = draftKey();
+    status.hidden = true;
+    if (!form.getClientRects().length || !form.checkValidity()) return;
+    const request = new AbortController();
+    controller = request;
+    status.textContent = "Checking cost…";
+    status.hidden = false;
+    timer = setTimeout(async () => {
+      const isCurrent = () => !request.signal.aborted && form.isConnected
+        && form.getClientRects().length > 0 && !scanControlLocks.has(form);
+      if (!isCurrent()) {
+        lastDraft = null;
+        status.hidden = true;
+        return;
+      }
+      try {
+        await estimate({currentTarget:form, preventDefault() {}, signal:request.signal, isCurrent});
+        if (isCurrent()) status.hidden = true;
+      } catch (error) {
+        if (isCurrent()) {
+          lastDraft = null;
+          status.textContent = error.message;
+        }
+      } finally {
+        if (controller === request && !isCurrent()) {
+          lastDraft = null;
+          status.hidden = true;
+        }
+      }
+    }, 350);
+  }
+  form.addEventListener("input", refresh);
+  form.addEventListener("change", refresh);
+  form.addEventListener("submit", event => { event.preventDefault(); refresh(); });
+  scanEstimateRefresh.set(form, refresh);
+  return refresh;
+}
+
+function refreshSelectedScanEstimate() {
+  const dialog = $("#smart-scan-options-dialog");
+  if (!dialog?.open) return;
+  const tab = state.discoveryTab;
+  const form = tab === "web_ct" ? $("#web-scan-form", dialog)
+    : tab === "paid_ads" ? $("#paid-discovery-form", dialog)
+    : $$("[data-discovery-method-form]", dialog).find(node => node.dataset.discoveryMethodForm === tab);
+  if (!form?.closest("[hidden]")) scanEstimateRefresh.get(form)?.();
+}
+
+async function requestScanEstimate(event, endpoint, config) {
+  const draft = JSON.stringify(config());
+  const mission = selectedScanMission();
+  const data = await api(endpoint, {
+    method: "POST", body: draft, signal: event.signal, invalidateWorkbench:false,
+  });
+  if (event.isCurrent?.() === false || mission !== selectedScanMission() || draft !== JSON.stringify(config())) return null;
+  return data;
+}
+
+function scanToastTone(status) {
+  if (["failed", "partial", "interrupted", "error"].includes(status)) return "error";
+  return ["complete", "completed"].includes(status) ? "success" : "info";
+}
+
+function showToast(message, tone = "success") {
   const toast = document.createElement("div");
   toast.className = "toast";
+  toast.dataset.tone = tone;
   toast.textContent = scanTerminology(message);
   $("#toasts").append(toast);
-  setTimeout(() => toast.remove(), 3200);
+  setTimeout(() => toast.remove(), tone === "error" ? 6500 : 4000);
 }
 
 function setPageSearchStatus(value = "") {
@@ -442,11 +529,6 @@ function applyLocalPageSearch() {
     $$("#source-groups .source-group").forEach(group => {
       group.hidden = query && ![...group.querySelectorAll("tbody tr")].some(row => !row.hidden);
     });
-  }
-  if (state.activeView === "intelligence" && query) {
-    const selected = $("[data-discovery-tab][aria-selected='true']");
-    const firstMatch = units.find(unit => !unit.hidden);
-    if (selected?.hidden && firstMatch) selectDiscoveryTab(firstMatch.dataset.discoveryTab);
   }
   setPageSearchStatus(query ? `${formatNumber(matches)} match${matches === 1 ? "" : "es"}` : "");
 }
@@ -851,7 +933,7 @@ function contactActions(item, { detailed = false } = {}) {
     actions.push(`<a class="contact-action phone-action" href="${escapeHtml(phoneHref)}" aria-label="Call ${escapeHtml(companyName(item))} at ${escapeHtml(phoneLabel)}">${escapeHtml(phoneLabel)}</a>`);
   }
   if (site !== "#") actions.push(`<a class="contact-action site-action" href="${site}" target="_blank" rel="noopener noreferrer">Site</a>`);
-  if (email) actions.push(`<button type="button" class="contact-action copy-email-action" data-copy-email="${escapeHtml(email)}"><span>Email</span></button>`);
+  if (email) actions.push(`<button type="button" class="contact-action copy-email-action" data-copy-email="${escapeHtml(email)}">${escapeHtml(email)}</button>`);
   return `<div class="contact-actions ${detailed ? "detailed" : ""}">${actions.join("")}</div>`;
 }
 
@@ -1102,11 +1184,11 @@ async function loadDashboard({ useCached = false } = {}) {
       renderOverview(enriched);
       writeTargetOverviewCache(enriched);
     } catch (statusError) {
-      showToast(statusError.message);
+      showToast(statusError.message, "error");
       writeTargetOverviewCache({ ...overview, _sort: state.overviewSort });
     }
   } catch (error) {
-    showToast(error.message);
+    showToast(error.message, "error");
     if (cached) return;
     $("#buyer-target-body").innerHTML = `<tr><td colspan="5" class="loading-row">Could not load buyer targets.</td></tr>`;
     $("#referral-target-body").innerHTML = `<tr><td colspan="5" class="loading-row">Could not load agency targets.</td></tr>`;
@@ -1249,7 +1331,7 @@ async function loadAccounts() {
     $("#account-next").disabled = last >= state.accountTotal;
   } catch (error) {
     if (requestId !== state.accountRequestId) return;
-    showToast(error.message);
+    showToast(error.message, "error");
     $("#account-body").innerHTML = `<tr><td colspan="9" class="loading-row">Could not load accounts.</td></tr>`;
   }
 }
@@ -1477,7 +1559,7 @@ function bindAccountWorkspace(account) {
       showToast("Account profile saved");
       renderAccountWorkspace(refreshed);
       await refreshAccountViews();
-    } catch (error) { showToast(error.message); }
+    } catch (error) { showToast(error.message, "error"); }
   });
   $("#qualification-form").addEventListener("submit", async event => {
     event.preventDefault(); const form = event.currentTarget;
@@ -1493,7 +1575,7 @@ function bindAccountWorkspace(account) {
       why_now: form.elements.why_now.value,
       first_month_asks: [0, 1, 2].map(index => form.elements[`ask_${index}`].value),
     };
-    try { await saveAccountDocument("qualification", body, "Qualification recomputed"); } catch (error) { showToast(error.message); }
+    try { await saveAccountDocument("qualification", body, "Qualification recomputed"); } catch (error) { showToast(error.message, "error"); }
   });
   $("#capacity-map-form").addEventListener("submit", async event => {
     event.preventDefault(); const form = event.currentTarget;
@@ -1501,22 +1583,22 @@ function bindAccountWorkspace(account) {
       version: "creative-capacity-map-v1", current_promotion: arrayFromLines(form.elements.current_promotion.value), distinct_concept_count: numberOrNull(form.elements.distinct_concept_count.value), concept_notes: arrayFromLines(form.elements.concept_notes.value), observed_demand: arrayFromLines(form.elements.observed_demand.value), production_gap_hypothesis: form.elements.production_gap_hypothesis.value,
       first_month_asks: [0, 1, 2].map(index => form.elements[`map_ask_${index}`].value), first_month_queue: arrayFromLines(form.elements.first_month_queue.value), economic_buyer: form.elements.map_buyer_role.value.trim() ? { name: form.elements.map_buyer_name.value.trim(), role: form.elements.map_buyer_role.value.trim() } : null, rights_ai_objection: form.elements.rights_ai_objection.value,
     };
-    try { await saveAccountDocument("capacity-map", body, "Creative Capacity Map saved"); } catch (error) { showToast(error.message); }
+    try { await saveAccountDocument("capacity-map", body, "Creative Capacity Map saved"); } catch (error) { showToast(error.message, "error"); }
   });
   $("#discovery-form").addEventListener("submit", async event => {
     event.preventDefault(); const form = event.currentTarget;
     const firstThreeAsks = [0, 1, 2].map(index => form.elements[`discovery_ask_${index}`].value.trim()).filter(Boolean);
     if (form.elements.completed.checked && !form.elements.held_at.value) {
-      showToast("Completed discovery requires a held date");
+      showToast("Completed discovery requires a held date", "error");
       return;
     }
     const body = { outcome: form.elements.discovery_outcome.value, outcome_reason: form.elements.outcome_reason.value, research_minutes: Number(form.elements.research_minutes.value || 0), confirmed_recurring_need: form.elements.confirmed_recurring_need.value === "" ? null : form.elements.confirmed_recurring_need.value === "true", held_at: isoOrNull(form.elements.held_at.value), creative_backlog: arrayFromLines(form.elements.creative_backlog.value), must_ship_30_days: arrayFromLines(form.elements.must_ship_30_days.value), must_ship_60_days: arrayFromLines(form.elements.must_ship_60_days.value), must_ship_90_days: arrayFromLines(form.elements.must_ship_90_days.value), new_concepts_last_month: numberOrNull(form.elements.new_concepts_last_month.value), idea_to_usable_asset_days: numberOrNull(form.elements.idea_to_usable_asset_days.value), paid_media_structure: form.elements.paid_media_structure.value, optimization_event: form.elements.optimization_event.value.trim(), weekly_optimization_events: numberOrNull(form.elements.weekly_optimization_events.value), creative_constraint: form.elements.creative_constraint.value, paid_media_notes: form.elements.paid_media_notes.value, employee_monthly_cost: numberOrNull(form.elements.employee_monthly_cost.value), agency_monthly_cost: numberOrNull(form.elements.agency_monthly_cost.value), freelancer_monthly_cost: numberOrNull(form.elements.freelancer_monthly_cost.value), vendor_coordination_hours: numberOrNull(form.elements.vendor_coordination_hours.value), fidelity_rights_constraints: arrayFromLines(form.elements.fidelity_rights_constraints.value), approver: form.elements.approver_role.value.trim() ? { name: form.elements.approver_name.value.trim(), role: form.elements.approver_role.value.trim() } : null, approver_turnaround_days: numberOrNull(form.elements.approver_turnaround_days.value), first_three_asks: firstThreeAsks, notes: form.elements.notes.value, completed: form.elements.completed.checked };
-    try { await saveAccountDocument("discovery", body, "Scan review saved"); } catch (error) { showToast(error.message); }
+    try { await saveAccountDocument("discovery", body, "Scan review saved"); } catch (error) { showToast(error.message, "error"); }
   });
   $("#outcome-form").addEventListener("submit", async event => {
     event.preventDefault(); const form = event.currentTarget;
     const body = { outreach_outcome: form.elements.outreach_outcome.value, proposal_outcome: form.elements.proposal_outcome.value, proposal_sent_at: isoOrNull(form.elements.proposal_sent_at.value), proposal_monthly_value: numberOrNull(form.elements.proposal_monthly_value.value), won_at: isoOrNull(form.elements.won_at.value), lost_at: isoOrNull(form.elements.lost_at.value), lost_reason: form.elements.lost_reason.value, month_one_started_at: form.elements.month_one_started_at.value || null, notes: form.elements.notes.value };
-    try { await saveAccountDocument("outcome", body, "Sales outcome saved"); } catch (error) { showToast(error.message); }
+    try { await saveAccountDocument("outcome", body, "Sales outcome saved"); } catch (error) { showToast(error.message, "error"); }
   });
   $("#delivery-form").addEventListener("submit", async event => {
     event.preventDefault(); const form = event.currentTarget;
@@ -1525,7 +1607,7 @@ function bindAccountWorkspace(account) {
     const body = Object.fromEntries(numericFields.map(name => [name, numberOrNull(form.elements[name].value)]));
     zeroFields.forEach(name => { body[name] = Number(form.elements[name].value || 0); });
     Object.assign(body, { delivery_burden: form.elements.delivery_burden.value, day_21_renewal_intent: form.elements.day_21_renewal_intent.value, renewal_decision: form.elements.renewal_decision.value, renewal_decided_at: form.elements.renewal_decided_at.value || null, notes: form.elements.notes.value });
-    try { await saveAccountDocument("delivery", body, "Delivery and renewal saved"); } catch (error) { showToast(error.message); }
+    try { await saveAccountDocument("delivery", body, "Delivery and renewal saved"); } catch (error) { showToast(error.message, "error"); }
   });
   const verificationToggle = $("#claim-form").elements.human_verified;
   const verifierInput = $("#claim-form").elements.verified_by;
@@ -1539,7 +1621,7 @@ function bindAccountWorkspace(account) {
     try {
       const refreshed = unwrapAccount(await api(`/api/accounts/${encodeURIComponent(account.id)}/claims`, { method: "POST", body: JSON.stringify(body) }));
       showToast("Evidence claim added"); renderAccountWorkspace(refreshed); await refreshAccountViews();
-    } catch (error) { showToast(error.message); }
+    } catch (error) { showToast(error.message, "error"); }
   });
 }
 
@@ -1608,7 +1690,7 @@ async function loadProspects() {
     renderTargetViewCoverage(state.targetStatus, state.targetShortfall);
   } catch (error) {
     if (requestId !== state.prospectRequestId) return;
-    showToast(error.message);
+    showToast(error.message, "error");
     $("#prospect-body").innerHTML = `<tr><td colspan="8" class="loading-row">Could not load targets.</td></tr>`;
     $("#target-view-title").textContent = "Target intelligence unavailable";
     $("#target-view-copy").textContent = error.message;
@@ -1856,7 +1938,7 @@ async function loadSources({ useCached = false } = {}) {
     applySourcesPayload(result);
     writeSourcesViewCache("sources", result);
   } catch (error) {
-    showToast(error.message);
+    showToast(error.message, "error");
     clearLoadingIndicators("#source-groups, #active-discovery-source-body, #accepted-source-body");
   }
 }
@@ -1934,7 +2016,7 @@ function openCompanyPurge(onServer) {
   dialog.className = "modal company-purge-dialog";
   dialog.setAttribute("aria-labelledby", "company-purge-title");
   dialog.innerHTML = `<form class="modal-card">
-    <header class="modal-head"><h2 id="company-purge-title">Purge company data</h2>
+    <header class="modal-head"><h2 id="company-purge-title" tabindex="-1" autofocus>Purge company data</h2>
       <button class="icon-button" type="button" data-purge-close aria-label="Close">×</button></header>
     <div class="modal-body company-purge-body">
       <div class="company-purge-progress"><strong id="company-purge-size" data-purge-size>Checking database size…</strong>
@@ -2133,7 +2215,7 @@ function openCompanyPurge(onServer) {
       await api(`${endpoint}/job/${encodeURIComponent(jobId)}/cancel`, {method:"POST"});
     } catch (error) {
       cancel.disabled = reclaiming;
-      showToast(error.message);
+      showToast(error.message, "error");
     }
   });
   dialog.addEventListener("cancel", event => { if (deleting) event.preventDefault(); });
@@ -2316,7 +2398,7 @@ function openCompanyPurge(onServer) {
       renderPurgeJob(job);
       if (purgeInProgress(job)) pollTimer = setTimeout(pollPurgeJob, 1000);
     } catch (error) {
-      if (!dialog.open) { showToast(error.message); return; }
+      if (!dialog.open) { showToast(error.message, "error"); return; }
       renderPurgeJob({status:"failed", error:error.message});
       // The server may have accepted the job before the connection dropped.
       await pollPurgeJob();
@@ -2377,7 +2459,7 @@ function settingsShell() {
           <div class="settings-body">
             <h3 id="collection-tools-title">Collection tools</h3>
             <p>Manage discovery sources and configure advanced scans.</p>
-            <div class="settings-actions"><button class="button" type="button" data-view="sources">Sources</button><button class="button" type="button" data-view="intelligence">Advanced scan</button></div>
+            <div class="settings-actions"><button class="button" type="button" data-view="sources">Sources</button></div>
           </div>
         </section>
       </div>
@@ -2397,7 +2479,7 @@ function settingsShell() {
         </tbody></table>
       </section>
       <dialog class="modal treg-modal" id="treg-settings-modal" aria-labelledby="treg-settings-title">
-        <header class="modal-head"><h2 id="treg-settings-title">Treg</h2><button type="button" class="icon-button" data-close-dialog="treg-settings-modal" aria-label="Close Treg settings">×</button></header>
+        <header class="modal-head"><h2 id="treg-settings-title" tabindex="-1" autofocus>Treg</h2><button type="button" class="icon-button" data-close-dialog="treg-settings-modal" aria-label="Close Treg settings">×</button></header>
         <div class="modal-body">
           <form class="secret-form" data-buyer-provider="treg">
             <div class="settings-actions"><strong>Connection</strong><span class="badge" id="buyer-provider-treg">${loadingIndicator("Checking…")}</span></div>
@@ -2419,7 +2501,6 @@ function settingsShell() {
               <label class="field"><span>Ranked companies</span><input name="company_limit" type="number" min="1" max="250" value="50" required /></label>
               <label class="field"><span>Run ceiling · USD</span><input name="maximum_usd" type="number" min="0.01" max="5" step="0.01" value="1" required /></label>
             </div>
-            <div class="settings-actions"><button class="button primary" type="submit">Estimate intelligence refresh</button></div>
           </form>
           <div id="buyer-intelligence-status" aria-live="polite"></div>
         </div>
@@ -2434,7 +2515,6 @@ function settingsShell() {
               <label class="field"><span>People per company</span><input name="people_limit" type="number" min="2" max="12" value="8" required /></label>
             </div>
             <p class="form-note">Scans find people only. Use Find emails on a company to request work emails.</p>
-            <div class="settings-actions"><button class="button primary" type="submit" id="estimate-people-hydration">Estimate paid run</button></div>
           </form>
           <section id="people-hydration-quote" class="people-hydration-quote" hidden></section>
           <section id="people-hydration-run" class="people-hydration-run" aria-live="polite"></section>
@@ -2460,19 +2540,19 @@ function settingsShell() {
   $("#remove-microlink-secret").addEventListener("click", removeMicrolinkSecret);
   document.querySelectorAll("[data-buyer-provider]").forEach(form => form.addEventListener("submit", saveBuyerProvider));
   document.querySelectorAll("[data-remove-buyer-provider]").forEach(button => button.addEventListener("click", removeBuyerProvider));
-  $("#buyer-intelligence-form").addEventListener("submit", quoteBuyerIntelligence);
-  $("#people-hydration-form").addEventListener("submit", estimatePeopleHydration);
-  $("#people-hydration-form").addEventListener("input", () => {
-    if (scanControlLocks.has($("#people-hydration-form"))) return;
+  const peopleForm = $("#people-hydration-form");
+  const refreshPeople = bindAutomaticScanEstimate(peopleForm, estimatePeopleHydration, () => {
     state.peopleHydrationQuote = null;
     $("#people-hydration-quote").hidden = true;
   });
-  $("#buyer-intelligence-form").addEventListener("input", () => {
-    if (buyerIntelligencePending || buyerIntelligenceStatus?.status !== "quoted") return;
+  peopleForm.addEventListener("focusin", event => { if (!state.peopleHydrationQuote) refreshPeople(event); });
+  const buyerForm = $("#buyer-intelligence-form");
+  const refreshBuyer = bindAutomaticScanEstimate(buyerForm, quoteBuyerIntelligence, () => {
     buyerIntelligenceQuote = null;
     buyerIntelligenceStatus = null;
     $("#buyer-intelligence-status").replaceChildren();
   });
+  buyerForm.addEventListener("focusin", event => { if (!buyerIntelligenceQuote) refreshBuyer(event); });
   $("#dataforseo-secret-form").addEventListener("submit", saveDataForSEOSecret);
   $("#remove-dataforseo-secret").addEventListener("click", removeDataForSEOSecret);
 }
@@ -2586,7 +2666,7 @@ async function saveBuyerProvider(event) {
     });
     form.reset();
     await loadBuyerProviderSettings();
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
 }
 
 async function removeBuyerProvider(event) {
@@ -2595,7 +2675,7 @@ async function removeBuyerProvider(event) {
     await api(`/api/settings/buyer-provider/${provider}`, { method: "DELETE" });
     $(`[data-buyer-provider="${provider}"]`).reset();
     await loadBuyerProviderSettings();
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
 }
 
 function renderBuyerIntelligence(data) {
@@ -2621,7 +2701,7 @@ function renderBuyerIntelligence(data) {
       cancel.disabled = true;
       try {
         renderBuyerIntelligence(await api(`/api/sales-engine/buyer-intelligence/${data.id}/cancel`, { method: "POST" }));
-      } catch (error) { showToast(error.message); }
+      } catch (error) { showToast(error.message, "error"); }
       finally {
         buyerIntelligencePending = false;
         renderBuyerIntelligence(buyerIntelligenceStatus);
@@ -2645,7 +2725,7 @@ function renderBuyerIntelligence(data) {
           method: "POST", body: JSON.stringify({ confirmed_maximum_microusd: data.maximum_microusd }),
         });
         renderBuyerIntelligence(started);
-      } catch (error) { showToast(error.message); }
+      } catch (error) { showToast(error.message, "error"); }
       finally {
         buyerIntelligencePending = false;
         renderBuyerIntelligence(buyerIntelligenceStatus);
@@ -2665,32 +2745,20 @@ async function pollBuyerIntelligence() {
     if (buyerIntelligencePending || quoteId !== buyerIntelligenceQuote) return;
     renderBuyerIntelligence(data);
     if (["running", "cancel_requested"].includes(data.status)) buyerIntelligencePoll = setTimeout(pollBuyerIntelligence, 2500);
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
 }
 
 async function quoteBuyerIntelligence(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  const button = form.querySelector("button[type=submit]");
-  if (buyerIntelligencePending || scanActionBlocked(button) || !form.reportValidity()) return;
-  const request = { company_limit: Number(form.elements.company_limit.value),
-    maximum_microusd: Math.round(Number(form.elements.maximum_usd.value) * 1000000) };
-  buyerIntelligencePending = true;
-  buyerIntelligenceStatus = null;
-  buyerIntelligenceQuote = null;
-  clearTimeout(buyerIntelligencePoll);
-  $("#buyer-intelligence-status").replaceChildren();
-  setScanControlsLocked(form, true);
-  try {
-    const data = await api("/api/sales-engine/buyer-intelligence/quote", { method: "POST", body: JSON.stringify(request) });
-    buyerIntelligenceQuote = data.id;
-    renderBuyerIntelligence(data);
-  } catch (error) { showToast(error.message); }
-  finally {
-    buyerIntelligencePending = false;
-    setScanControlsLocked(form, false);
-    if (buyerIntelligenceStatus) renderBuyerIntelligence(buyerIntelligenceStatus);
-  }
+  if (buyerIntelligencePending || scanControlLocks.has(form) || !form.checkValidity()) return;
+  const data = await requestScanEstimate(event, "/api/sales-engine/buyer-intelligence/quote", () => ({
+    company_limit: Number(form.elements.company_limit.value),
+    maximum_microusd: Math.round(Number(form.elements.maximum_usd.value) * 1000000),
+  }));
+  if (!data) return;
+  buyerIntelligenceQuote = data.id;
+  renderBuyerIntelligence(data);
 }
 
 async function loadSecretSettings() {
@@ -2700,7 +2768,7 @@ async function loadSecretSettings() {
     $("#secret-state").className = `badge ${data.configured ? "moss" : ""}`;
     $("#secret-meta").textContent = data.configured ? `Key saved` : "No key is active";
   } catch (error) {
-    showToast(error.message);
+    showToast(error.message, "error");
     $("#secret-state").textContent = "Unavailable";
     $("#secret-meta").textContent = "Local access only";
   }
@@ -2721,11 +2789,11 @@ async function saveSecret(event) {
     const setup = result.mission_setup;
     const completed = setup?.completed === 1 ? "Mission ready." : setup?.completed ? `${setup.completed} missions ready.` : "";
     const error = compilationErrorText(setup);
-    showToast(["API key saved.", completed, error].filter(Boolean).join(" "));
+    showToast(["API key saved.", completed, error].filter(Boolean).join(" "), error ? "error" : "success");
     state.discoveryMethods = null;
     if (setup) invalidateSalesWorkbench();
     await Promise.all([loadSecretSettings(), loadScanReadiness(), setup && loadSalesMissions()]);
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
   finally { submit.disabled = false; submit.textContent = label; }
 }
 
@@ -2738,7 +2806,7 @@ async function removeSecret() {
     showToast("API key removed");
     state.discoveryMethods = null;
     await Promise.all([loadSecretSettings(), loadScanReadiness()]);
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
 }
 
 function renderOpenAIBillingSettings(data = {}) {
@@ -2773,7 +2841,7 @@ async function saveOpenAIBillingSecret(event) {
     });
     renderOpenAIBillingSettings(data);
     showToast("Billing key saved · Refresh Spend to read costs");
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
   finally { form.reset(); button.disabled = false; }
 }
 
@@ -2784,7 +2852,7 @@ async function removeOpenAIBillingSecret() {
     $("#openai-billing-form").reset();
     renderOpenAIBillingSettings(data);
     showToast("Billing key removed");
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
 }
 
 function renderApifySecretSettings(data = {}) {
@@ -2802,7 +2870,7 @@ async function loadApifySecretSettings() {
   try {
     renderApifySecretSettings(await api("/api/settings/apify-token"));
   } catch (error) {
-    showToast(error.message);
+    showToast(error.message, "error");
     if ($("#apify-secret-state")) $("#apify-secret-state").textContent = "Unavailable";
     if ($("#apify-secret-meta")) $("#apify-secret-meta").textContent = "Local access only";
   }
@@ -2824,7 +2892,7 @@ async function saveApifySecret(event) {
       const prepared = prepareMetaExistingBacklogDraft();
       if (prepared) showToast(`Apify ready · ${formatNumber(prepared)} Meta targets due`);
     }
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
 }
 
 async function removeApifySecret() {
@@ -2837,7 +2905,7 @@ async function removeApifySecret() {
     state.discoveryMethods = null;
     await loadScanReadiness();
     if ($("#paid-discovery-form")) await loadAdDiscoveryOverview();
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
 }
 
 function renderMicrolinkSecretSettings(data = {}) {
@@ -2855,7 +2923,7 @@ async function loadMicrolinkSecretSettings() {
   try {
     renderMicrolinkSecretSettings(await api("/api/settings/microlink-key"));
   } catch (error) {
-    showToast(error.message);
+    showToast(error.message, "error");
     if ($("#microlink-secret-state")) $("#microlink-secret-state").textContent = "Unavailable";
     if ($("#microlink-secret-meta")) $("#microlink-secret-meta").textContent = "Local access only";
   }
@@ -2874,7 +2942,7 @@ async function saveMicrolinkSecret(event) {
     renderMicrolinkSecretSettings(data);
     showToast("Microlink key saved");
     await loadScanReadiness();
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
 }
 
 async function removeMicrolinkSecret() {
@@ -2885,7 +2953,7 @@ async function removeMicrolinkSecret() {
     renderMicrolinkSecretSettings(data);
     showToast("Microlink key removed");
     await loadScanReadiness();
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
 }
 
 function renderPeopleHydration(data = state.peopleHydration) {
@@ -2947,24 +3015,16 @@ async function loadPeopleHydrationStatus() {
 async function estimatePeopleHydration(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  const button = $("#estimate-people-hydration");
-  if (scanActionBlocked(button) || state.peopleHydrationStarting || !form.reportValidity()) return;
-  const values = new FormData(form);
-  state.peopleHydrationQuote = null;
-  $("#people-hydration-quote").hidden = true;
-  setScanControlsLocked(form, true);
-  try {
-    state.peopleHydrationQuote = await api("/api/people-hydration/estimate", {
-      method: "POST", body: JSON.stringify({ company_limit: Number(values.get("company_limit")), people_limit: Number(values.get("people_limit")), email_limit: 0 }),
-    });
-    renderPeopleHydrationQuote();
-  } catch (error) {
-    showToast(error.message);
-  } finally {
-    setScanControlsLocked(form, false);
-    renderPeopleHydration();
-    renderPeopleHydrationQuote();
-  }
+  if (!state.peopleHydration?.configured || state.peopleHydrationStarting
+      || scanControlLocks.has(form) || !form.checkValidity()) return;
+  const data = await requestScanEstimate(event, "/api/people-hydration/estimate", () => ({
+    company_limit:Number(form.elements.company_limit.value),
+    people_limit:Number(form.elements.people_limit.value),
+    email_limit:0,
+  }));
+  if (!data) return;
+  state.peopleHydrationQuote = data;
+  renderPeopleHydrationQuote();
 }
 
 function renderPeopleHydrationQuote() {
@@ -3000,7 +3060,7 @@ async function startPeopleHydration() {
   if (button) { button.disabled = true; button.textContent = "Starting…"; }
   $("#treg-settings-modal")?.close();
   renderAggregateScanState();
-  void setView("smart_scan").catch(error => showToast(error.message));
+  void setView("smart_scan").catch(error => showToast(error.message, "error"));
   try {
     const run = await api("/api/people-hydration/runs", {
       method: "POST",
@@ -3026,7 +3086,7 @@ async function startPeopleHydration() {
     }};
     if (state.scanOverview) state.scanOverview.people = state.peopleHydration.run;
     renderAggregateScanState();
-    showToast(error.message);
+    showToast(error.message, "error");
     if (button) { button.disabled = false; button.textContent = `Confirm ${maximumCostMoney(quote.maximum_usd)} max and run`; }
   } finally {
     state.peopleHydrationStarting = false;
@@ -3055,7 +3115,7 @@ async function pollPeopleHydration() {
     if (state.peopleHydration.run?.status === "running") {
       state.peopleHydrationPollTimer = setTimeout(pollPeopleHydration, 2500);
     } else if (previous === "running") {
-      showToast(state.peopleHydration.run?.message || "People hydration finished");
+      showToast(state.peopleHydration.run?.message || "People hydration finished", scanToastTone(state.peopleHydration.run?.status));
       await refreshVisibleData();
     }
   } catch {
@@ -3080,7 +3140,7 @@ async function loadDataForSEOSecretSettings() {
   try {
     renderDataForSEOSecretSettings(await api("/api/settings/dataforseo-credentials"));
   } catch (error) {
-    showToast(error.message);
+    showToast(error.message, "error");
     if ($("#dataforseo-secret-state")) $("#dataforseo-secret-state").textContent = "Unavailable";
     if ($("#dataforseo-secret-meta")) $("#dataforseo-secret-meta").textContent = "Local access only";
   }
@@ -3100,7 +3160,7 @@ async function saveDataForSEOSecret(event) {
     renderDataForSEOSecretSettings(data);
     showToast("DataForSEO credentials saved");
     await Promise.all([loadScanReadiness(), loadSmartScan()]);
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
 }
 
 async function removeDataForSEOSecret() {
@@ -3111,7 +3171,7 @@ async function removeDataForSEOSecret() {
     renderDataForSEOSecretSettings(data);
     showToast("DataForSEO credentials removed");
     await Promise.all([loadScanReadiness(), loadSmartScan()]);
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
 }
 
 function canonicalDiscoveryTabId(value = "", label = "") {
@@ -3148,7 +3208,7 @@ function discoveryTabs() {
 
 function discoveryTabListMarkup() {
   return `<div class="discovery-tab-shell"><div class="discovery-tabs" role="tablist" aria-label="Scan method">
-    ${discoveryTabs().map(tab => `<button class="discovery-tab" id="discovery-tab-${tab.id}" type="button" role="tab" aria-controls="discovery-panel-${tab.id}" aria-selected="${state.discoveryTab === tab.id}" tabindex="${state.discoveryTab === tab.id ? "0" : "-1"}" data-discovery-tab="${tab.id}" data-search-text="${escapeHtml(tab.label)}"><span>${escapeHtml(tab.label)}</span><small id="discovery-tab-meta-${tab.id}">—</small><small class="discovery-tab-failure" id="discovery-tab-failure-${tab.id}">No scans yet</small><span class="discovery-tab-progress" id="discovery-tab-progress-${tab.id}" role="progressbar" aria-label="${escapeHtml(tab.label)} scan progress" aria-valuemin="0" aria-valuemax="100" aria-hidden="true"><i></i></span></button>`).join("")}
+    ${discoveryTabs().filter(tab => tab.id !== "find_sources").map(tab => `<button class="discovery-tab" id="discovery-tab-${tab.id}" type="button" role="tab" aria-controls="discovery-panel-${tab.id}" aria-selected="${state.discoveryTab === tab.id}" tabindex="${state.discoveryTab === tab.id ? "0" : "-1"}" data-discovery-tab="${tab.id}" data-search-text="${escapeHtml(tab.label)}"><span>${escapeHtml(tab.label)}</span><small id="discovery-tab-meta-${tab.id}">—</small><small class="discovery-tab-failure" id="discovery-tab-failure-${tab.id}">No scans yet</small><span class="discovery-tab-progress" id="discovery-tab-progress-${tab.id}" role="progressbar" aria-label="${escapeHtml(tab.label)} scan progress" aria-valuemin="0" aria-valuemax="100" aria-hidden="true"><i></i></span></button>`).join("")}
   </div></div>`;
 }
 
@@ -3168,7 +3228,7 @@ function discoveryReliabilityBadge(tab = {}) {
 }
 
 function discoveryMethodHeader(tab, badgeMarkup) {
-  return `<div class="panel-head"><h3>${escapeHtml(tab.label)}</h3><div class="discovery-method-badges">${badgeMarkup}${discoveryReliabilityBadge(tab)}</div></div>`;
+  return `<div class="panel-head"><div class="scan-card-title"><h3>${escapeHtml(tab.label)}</h3>${scanCardHelp(tab.id, tab.label, SCAN_METHOD_HELP[tab.id])}</div><div class="discovery-method-badges">${badgeMarkup}</div></div>`;
 }
 
 function discoveryPanelAttributes(tabId) {
@@ -3181,11 +3241,11 @@ function discoveryMethodPanelShell(tab) {
 
 function bindDiscoveryTabs() {
   $$("[data-discovery-tab]").forEach(button => {
-    button.addEventListener("click", () => selectDiscoveryTab(button.dataset.discoveryTab));
+    button.addEventListener("click", () => selectDiscoveryTab(button.dataset.discoveryTab, {focus:true}));
     button.addEventListener("keydown", event => {
       if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
       event.preventDefault();
-      const tabs = $$("[data-discovery-tab]");
+      const tabs = $$("[data-discovery-tab]").filter(tab => !tab.hidden);
       const current = tabs.indexOf(event.currentTarget);
       const target = event.key === "Home"
         ? 0
@@ -3198,20 +3258,47 @@ function bindDiscoveryTabs() {
 }
 
 function selectDiscoveryTab(tabId, { focus = false } = {}) {
-  const tabs = discoveryTabs();
-  if (!tabs.some(tab => tab.id === tabId)) return;
+  const sectionLink = $$(".scan-section-link").find(button => button.dataset.discoveryTab === tabId);
+  if (!sectionLink && !discoveryTabs().some(tab => tab.id === tabId)) return;
+  if (tabId === "find_sources" && focus && $("#find-directories-dialog")) {
+    $("#smart-scan-options-dialog")?.close();
+    const dialog = $("#find-directories-dialog");
+    if (!dialog.open) dialog.showModal();
+    return;
+  }
+  const buttons = $$("[data-discovery-tab]");
+  const unavailable = new Set(buttons.filter(button => button.hidden).map(button => button.dataset.discoveryTab));
+  if (unavailable.has(tabId)) {
+    tabId = buttons.find(button => !button.hidden && !button.classList.contains("scan-section-link"))?.dataset.discoveryTab
+      || buttons.find(button => !button.hidden)?.dataset.discoveryTab;
+  }
   state.discoveryTab = tabId;
-  $$("[data-discovery-tab]").forEach(button => {
+  buttons.forEach(button => {
     const selected = button.dataset.discoveryTab === tabId;
     button.setAttribute("aria-selected", String(selected));
-    button.tabIndex = selected ? 0 : -1;
+    button.tabIndex = !button.hidden && ($("#scan-methods-content") || selected) ? 0 : -1;
     if (selected && focus) button.focus();
   });
-  $$("[data-discovery-panel]").forEach(panel => { panel.hidden = panel.dataset.discoveryPanel !== tabId; });
+  const continuous = Boolean($("#scan-methods-content"));
+  if (continuous) {
+    $(".discovery-tabs")?.setAttribute("role", "group");
+    $$("[data-discovery-tab]").forEach(button => button.removeAttribute("role"));
+    $$("[data-discovery-panel]").forEach(panel => panel.setAttribute("role", "region"));
+  }
+  $$("[data-discovery-panel]").forEach(panel => { panel.hidden = unavailable.has(panel.dataset.discoveryPanel) || (!continuous && panel.dataset.discoveryPanel !== tabId); });
+  if (continuous && focus) {
+    const sectionId = sectionLink?.getAttribute("aria-controls") || `discovery-panel-${tabId}`;
+    $(`#${sectionId}`)?.scrollIntoView({behavior:"smooth", block:"start"});
+    refreshSelectedScanEstimate();
+  }
 }
 
 function smartScanActive(scan = state.smartScan) {
   return ["starting", "queued", "running", "retrying", "reconnecting", "pausing", "paused", "restarting", "stopping"].includes(String(scan?.status || "").toLowerCase());
+}
+
+function smartScanInitializing(scan) {
+  return state.smartScanStarting || scan?.preparing === true;
 }
 
 function smartScanBusy(scan = state.smartScan) {
@@ -3253,6 +3340,68 @@ function scanCardHelp(id, label, ...paragraphs) {
     role="tooltip" popover="manual">${paragraphs.map(text => `<p>${escapeHtml(text)}</p>`).join("")}</div>`;
 }
 
+const SCAN_FIELD_HELP = {
+  "smart-scan-use-source-ai": "Use OpenAI to find and validate sources within the scan’s usage caps.",
+  "smart-scan-use-microlink": "Use Microlink allowance to render websites when direct retrieval fails.",
+  "smart-scan-discovery-terms": "Guide discovery with up to five search terms, one per line.",
+  "smart-scan-ml-contacts": "Read rendered contact and leadership pages for public contact details.",
+  "smart-scan-ml-browser_interactions": "Open public disclosures such as Show more. Uses the shared request limit.",
+  "smart-scan-ml-company_pages": "Read first-party pages for hiring, launches, and other sales signals.",
+  "smart-scan-ml-documents": "Read supported public documents linked from the company site.",
+  "smart-scan-ml-technologies": "Identify technologies used on the company website.",
+  "smart-scan-ml-media": "Look for creative assets and related metadata on the website.",
+  "smart-scan-ml-web_search": "Look for additional public evidence about ranked companies.",
+  "smart-scan-ml-news_search": "Look for recent company news that may signal buying timing.",
+  "smart-scan-ml-business_listings": "Look for public listings that help confirm company identity.",
+  lane: "Choose the mission or buying signals that guide company search.",
+  prefer_large: "Favor companies with evidence of at least 50 employees or enterprise scale.",
+  force_contacts: "Allow contact checks for companies that were checked recently.",
+  urls: "Paste company websites separated by lines, spaces, or commas.",
+  free_intelligence: "Collect public website evidence for company scoring.",
+  agency_discovery: "Check public signals that identify agencies and their services.",
+  people_hydration_enabled: "Use the paid people provider to find relevant contacts.",
+  microlink_enabled: "Allow rendered website fallback using Microlink allowance.",
+  ai_resolution: "Use OpenAI to resolve source results and review candidates within the limits above.",
+  mode: "Choose whether to discover advertisers, enrich existing targets, or do both.",
+  meta_enabled: "Include Meta Ad Library research through Apify.",
+  tiktok_library_enabled: "Search TikTok’s Commercial Content Library using Apify.",
+  tiktok_top_enabled: "Include TikTok Top Ads research through Apify.",
+  verify_landing_domains: "Check whether ad landing domains belong to the advertiser.",
+  hydrate_websites: "Inspect verified company websites for sales evidence.",
+};
+
+const SCAN_METHOD_HELP = {
+  web_ct: "Discover domains through public web sources and certificate records.",
+  company_intelligence: "Run selected research scanners on existing companies.",
+  tenant_footprints: "Find companies through tenant domains on shared platforms.",
+  directories: "Crawl approved directories for company websites.",
+  portfolios: "Find companies listed in approved brand group portfolios.",
+  customer_lists: "Find companies named in approved platform customer lists.",
+  searches: "Run saved searches to discover company candidates.",
+  public_graph: "Discover companies through public business and location datasets.",
+  paid_ads: "Use Apify to find advertisers and collect company-linked ad evidence.",
+};
+
+let scanHelpFieldId = 0;
+function addScanFieldHelp(root) {
+  for (const label of root.querySelectorAll("label")) {
+    const input = label.control;
+    if (!input || input.type === "hidden" || label.closest(".scan-field-help")
+      || label.nextElementSibling?.matches(".scan-card-info")) continue;
+    const caption = label.querySelector("span")?.textContent.trim() || label.textContent.trim();
+    const key = input.id || input.name;
+    const help = SCAN_FIELD_HELP[`${input.form?.id}:${key}`] || SCAN_FIELD_HELP[key]
+      || (!key && caption.startsWith("English") ? "This scan requires English-presenting websites." : "");
+    if (!help) continue;
+    const field = document.createElement("div");
+    field.className = "scan-field-help";
+    if (label.matches(".paid-query-field, .scan-setup-scope")) field.classList.add("scan-field-help-wide");
+    label.before(field);
+    field.append(label);
+    field.insertAdjacentHTML("beforeend", scanCardHelp(`field-${++scanHelpFieldId}`, caption, help));
+  }
+}
+
 function microlinkHydrationMarkup() {
   const checkbox = (key, label) => `<label class="smart-scan-ai-toggle"><input type="checkbox"
     id="smart-scan-ml-${key}" data-microlink-option="${key}" /><span>${label}</span></label>`;
@@ -3261,9 +3410,7 @@ function microlinkHydrationMarkup() {
     <div class="scan-option-rows">
       <div class="scan-option-row scan-microlink-row" role="group" aria-label="Contacts via Microlink">
         <div class="scan-card-title"><span>Contacts</span>
-        ${scanCardHelp("contacts", "Contacts via Microlink",
-          "Renders public contact, about and leadership pages, or the homepage when no such link is found. The normal contact extractor keeps company-linked names, roles and contact details found on those pages.",
-          "Expand dynamic content can open public disclosures such as “Show more” on Contacts or Company pages. It uses the shared Microlink request cap. This workflow reads public evidence and does not verify email deliverability.")}
+        ${scanCardHelp("contacts", "Contacts via Microlink", "Read public contact and leadership pages using Microlink allowance.")}
         </div>
         <div class="scan-option-checks">
           ${checkbox("contacts", "Contacts & leadership")}
@@ -3272,9 +3419,7 @@ function microlinkHydrationMarkup() {
       </div>
       <div class="scan-option-row scan-microlink-row" role="group" aria-label="Company evidence via Microlink">
         <div class="scan-card-title"><span>Company evidence</span>
-        ${scanCardHelp("company-evidence", "Company evidence via Microlink",
-          "Company pages looks for first-party hiring, procurement, production, launch and other evidence. Public documents reads supported files linked from the same company. Technology stack detects site tools, and Creative media looks for media and related metadata.",
-          "Eligible evidence feeds the existing scorer with its source URL and date. It supplements the saved homepage without changing the homepage’s refresh date.")}
+        ${scanCardHelp("company-evidence", "Company evidence via Microlink", "Collect first-party company evidence, documents, technologies, and media via Microlink.")}
         </div>
         <div class="scan-option-checks">
           ${checkbox("company_pages", "Company pages")}
@@ -3285,9 +3430,7 @@ function microlinkHydrationMarkup() {
       </div>
       <div class="scan-option-row scan-microlink-row" role="group" aria-label="Search &amp; timing via Microlink">
         <div class="scan-card-title"><span>Search &amp; timing</span>
-        ${scanCardHelp("search-timing", "Search & timing via Microlink",
-          "Searches the web, news and business listings for companies already in the ranked cohort. The scanner can follow up to three first-party URLs per company. External results provide cited context until the underlying evidence can be attributed.",
-          "Top companies and Max requests apply across all three Microlink groups, including dynamic expansions. Successful requests are reused for 90 days per company and request scope. These options use Microlink allowance and can run independently of Discover and refresh.")}
+        ${scanCardHelp("search-timing", "Search & timing via Microlink", "Find web, news, and listing evidence for ranked companies within your Microlink allowance.")}
         </div>
         <div class="scan-option-checks">
           ${checkbox("web_search", "Web search")}
@@ -3297,7 +3440,7 @@ function microlinkHydrationMarkup() {
       </div>
       <div class="scan-option-row scan-microlink-usage">
         <div class="scan-option-copy">
-          <div class="scan-card-title">Shared usage limits</div>
+          <div class="scan-card-title"><span>Shared usage limits</span>${scanCardHelp("microlink-limits", "Shared usage limits", "These limits apply across all selected Microlink research options.")}</div>
           <small id="smart-scan-ml-usage" class="scan-option-detail">Uses Microlink allowance</small>
         </div>
         <div class="scan-option-fields">
@@ -3393,7 +3536,7 @@ function scheduleSmartScanPaidEstimate() {
   const microlink = selectedMicrolink();
   const ads_sites = state.smartScanAdsEnabled ? Number(state.smartScanAdsCompanyLimit) : 0;
   const ads_max_usd = state.smartScanAdsEnabled ? Number(state.smartScanAdsMaxUSD) : 5;
-  const params = new URLSearchParams({ai_sites, seo_sites, due_hydration});
+  const params = new URLSearchParams({ai_sites, seo_sites, due_hydration, mission_id:selectedScanMission()});
   if (state.smartScan?.profile?.paid_ads_included) {
     params.set("ads_sites", String(ads_sites));
     params.set("ads_max_usd", String(ads_max_usd));
@@ -3429,6 +3572,7 @@ function scheduleSmartScanPaidEstimate() {
 }
 
 function updateSmartScanLaunchControls(scan = state.smartScan || {}) {
+  syncDiscoveryProviderChoices(scan);
   const profile = scan.profile || {};
   const inventory = scan.inventory || {};
   const active = smartScanActive(scan);
@@ -3469,6 +3613,7 @@ function updateSmartScanLaunchControls(scan = state.smartScan || {}) {
   }
   if (active && !scan.preparing) {
     state.smartScanDueHydrationEnabled = scan.due_hydration_enabled !== false;
+    state.smartScanDueCompanyLimit = scan.due_company_limit ?? null;
     state.smartScanAdsEnabled = Boolean(scan.paid_ads_enabled);
     state.smartScanAdsCompanyLimit = Number(scan.paid_ads_company_limit || 100);
     state.smartScanAdsMaxUSD = Number(scan.paid_ads_max_usd || 5);
@@ -3500,14 +3645,25 @@ function updateSmartScanLaunchControls(scan = state.smartScan || {}) {
   });
   const lockNote = $("#smart-scan-settings-lock");
   if (lockNote) {
-    lockNote.hidden = !locked;
-    lockNote.textContent = smartScanBusy(scan) || state.microlinkScanActive || scan.external_source_runs?.length
+    const scanInProgress = smartScanBusy(scan) || state.microlinkScanActive || scan.external_source_runs?.length;
+    lockNote.textContent = scanInProgress
       ? "Settings are locked while a scan is in progress."
-      : scan.inventory_error ? "Inventory is unavailable. Retry the inventory check from Scan."
-        : "Settings are locked while scan status updates.";
+      : scan.inventory_error ? "Inventory is unavailable. Retry the inventory check from Scan." : "";
+    lockNote.hidden = !locked || !lockNote.textContent;
   }
   show("#smart-scan-provider-note", !openAIConfigured || !dataForSEOConfigured
     || !adsConfigured || !peopleConfigured || !microlinkConfigured);
+  const refreshLimit = $("#smart-scan-due-limit");
+  if (refreshLimit) {
+    refreshLimit.value = state.smartScanDueCompanyLimit ?? "";
+    refreshLimit.disabled = locked || !state.smartScanDueHydrationEnabled;
+  }
+  const goalSend = $("#scan-goal-form button");
+  if (goalSend) {
+    goalSend.disabled = Boolean(state.smartScanGoalPending || locked || !openAIConfigured);
+    goalSend.setAttribute("aria-busy", String(Boolean(state.smartScanGoalPending)));
+    goalSend.title = !openAIConfigured ? "Connect OpenAI in Settings" : "Configure scan with AI · $0.02 max";
+  }
   const maximum = Number(profile.candidate_ai_call_max || 100);
   const seoMaximum = Number(profile.dataforseo_target_max || 100000);
   input.max = String(maximum);
@@ -3706,7 +3862,7 @@ function updateSmartScanLaunchControls(scan = state.smartScan || {}) {
         ? "Select a scan"
       : paidChecking
         ? estimatingCostLabel
-        : "Start Smart Scan";
+        : "Scan";
   if (!button.disabled) {
     const costText = unpricedUsage ? `Known ${costMoney(estimate)} + usage caps`
       : estimate === 0 ? "$0"
@@ -3722,9 +3878,10 @@ function updateSmartScanLaunchControls(scan = state.smartScan || {}) {
     const microlinkLocked = Boolean(scanLaunchConflict("microlink", scan));
     const importLocked = (!scan.cleaning_up && state.smartScanLoading) || Boolean(scanLaunchConflict("import", scan));
     launcher.disabled = Boolean(smartConflict);
-    const running = smartConflict === "Smart Scan is active.";
+    const initializing = smartScanInitializing(scan);
+    const running = initializing || smartConflict === "Smart Scan is active.";
     launcher.setAttribute("data-running", String(running));
-    const launcherLabel = running ? "Smart Scan is running..." : "Begin a Smart Scan";
+    const launcherLabel = initializing ? "Starting Smart Scan…" : running ? "Smart Scan is running..." : "Smart Scan";
     if (launcher.textContent !== launcherLabel) launcher.textContent = launcherLabel;
     shell?.querySelectorAll?.('[data-scan-setup="discovery"], [data-scan-setup="contacts"]').forEach(control => {
       control.disabled = microlinkLocked;
@@ -3801,28 +3958,58 @@ function updateSmartScanLaunchControls(scan = state.smartScan || {}) {
   }
 }
 
-function smartScanContentMarkup(status = "") {
+function smartScanContentMarkup() {
   const countLoader = loadingIndicator("Checking available companies…", {iconOnly:true});
   return `
     <div class="panel smart-scan-controls" id="smart-scan-controls">
     <div class="smart-scan-head">
       <button class="button smart-scan-button" id="scan-launch-trigger" type="button" data-scan-setup="smart" data-verbatim
-        aria-haspopup="dialog" aria-controls="smart-scan-options-dialog" disabled>Begin a Smart Scan</button>
+        aria-haspopup="dialog" aria-controls="smart-scan-options-dialog" disabled>Smart Scan</button>
+      <div class="smart-scan-run-controls" id="smart-scan-run-controls" hidden>
+        <button class="button" id="pause-resume-smart-scan" type="button" value="pause">Pause</button>
+        <button class="button danger" id="stop-smart-scan" type="button">Stop</button>
+      </div>
       <div class="smart-scan-choice-divider">OR</div>
-      <button class="button" data-scan-setup="discovery" type="button" aria-haspopup="dialog" aria-controls="smart-scan-options-dialog" disabled>Find new companies</button>
-      <button class="button" data-scan-setup="contacts" type="button" aria-haspopup="dialog" aria-controls="smart-scan-options-dialog" disabled>Find company contacts</button>
-      <button class="button" id="import-companies-trigger" type="button" aria-controls="import-scan-form" disabled>Import companies directly</button>
+      <div class="scan-shortcuts">
+        <button class="button" data-scan-setup="discovery" type="button" aria-haspopup="dialog" aria-controls="find-companies-dialog" disabled>Find companies</button>
+        <button class="button" id="import-companies-trigger" type="button" aria-haspopup="dialog" aria-controls="import-companies-dialog" disabled>Import companies</button>
+        <button class="button" id="find-directories-trigger" type="button" aria-haspopup="dialog" aria-controls="find-directories-dialog" disabled>Find directories</button>
+        <button class="button" data-scan-setup="contacts" type="button" aria-haspopup="dialog" aria-controls="find-contacts-dialog" disabled>Find contacts</button>
+      </div>
       <p class="scan-launch-lock" id="scan-launch-lock" role="status" hidden></p>
     </div>
     <dialog class="modal smart-scan-options-dialog" id="smart-scan-options-dialog" data-scan-mode="smart" aria-labelledby="smart-scan-options-title" aria-describedby="smart-scan-options-subtitle">
       <header class="modal-head">
         <div class="scan-setup-heading">
-          <h2 id="smart-scan-options-title">Smart Scan</h2>
+          <h2 id="smart-scan-options-title" tabindex="-1" autofocus>Smart Scan</h2>
           <p id="smart-scan-options-subtitle"></p>
         </div>
         <button type="button" class="icon-button" data-close-dialog="smart-scan-options-dialog" aria-label="Close scan setup">×</button>
       </header>
       <div class="modal-body scan-setup-body">
+      <form id="scan-goal-form" class="scan-goal-form" data-verbatim>
+        <label class="sr-only" for="scan-goal">Describe your scan goal</label>
+        <div class="scan-goal-input">
+          <svg class="scan-goal-sparkles" width="22" height="22" viewBox="0 0 24 24"
+            fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
+            stroke-linejoin="round" aria-hidden="true">
+            <path d="m10 5 2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6Z"/>
+            <path d="m19 2 1 3 3 1-3 1-1 3-1-3-3-1 3-1 1-3Z"/>
+          </svg>
+          <input id="scan-goal" name="goal" type="text" minlength="5" maxlength="500" required
+            autocomplete="off" placeholder="Describe your goal in one sentence…"
+            aria-describedby="scan-goal-status" />
+          <button class="button primary" type="submit" aria-label="Configure scan with AI, $0.02 maximum"
+            title="Set checks and conservative limits with AI · $0.02 max">
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 19V5m-6 6 6-6 6 6"/>
+            </svg>
+            <span data-configuring-label hidden>Configuring…</span>
+          </button>
+        </div>
+        <span id="scan-goal-status" role="status"></span>
+      </form>
       <p id="scan-setup-lane-lock" class="scan-setup-availability" role="status" hidden>Settings are locked while a scan or estimate is in progress.</p>
       <form id="microlink-discovery-form" class="scan-option-panel" data-scan-setup-panel="discovery" hidden>
         <section class="scan-option-group">
@@ -3866,6 +4053,11 @@ function smartScanContentMarkup(status = "") {
           </div>
         </section>
       </form>
+      <button type="button" class="button scan-basic-option" id="scan-basic-option" aria-pressed="true">Basic</button>
+      <div id="saved-scan-goals" data-scan-setup-panel="smart" aria-label="Saved scan goals"></div>
+      <section class="scan-methods-disclosure" id="scan-methods-disclosure" data-scan-setup-panel="smart" aria-label="Scan modes">
+        <div id="scan-methods-content"></div>
+      </section>
       <div class="scan-option-panel" data-scan-setup-panel="smart">
         <p id="smart-scan-settings-lock" class="scan-setup-availability" role="status" hidden></p>
         <section class="scan-option-group" aria-labelledby="smart-scan-scope-heading">
@@ -3875,14 +4067,16 @@ function smartScanContentMarkup(status = "") {
               <div class="scan-option-copy">
                 <div class="scan-card-title">
                   <label class="smart-scan-ai-toggle scan-option-toggle"><input id="smart-scan-due-hydration" type="checkbox" checked /><span>Discover and refresh companies</span></label>
-                  ${scanCardHelp("discover", "Discover and refresh companies",
-                  "Finds candidates through due approved sources, Web and certificate records, filings, news and recent RSS. It checks company sites for identity, contacts and sales evidence, and runs applicable research scanners.",
-                  "Completed company work is reused for 90 days. Unfinished work follows retry rules, and scanners can fill gaps using a saved homepage.",
-                  "Public collection has no paid provider charge by default. Source research via OpenAI finds and investigates sources within a tool-call cap. Website fallback via Microlink tries rendered HTML after certain direct retrieval failures and uses a separate Microlink allowance.")}
+                  ${scanCardHelp("discover", "Discover and refresh companies", "Find companies through public sources and refresh company websites that are due.")}
                 </div>
                 <small class="scan-option-detail">Public sources · 90-day refresh window</small>
               </div>
               <div class="scan-discovery-details">
+                <label class="smart-scan-ai-limit"><span>Max company refreshes</span>
+                  <input id="smart-scan-due-limit" type="number" min="1" max="10000"
+                    inputmode="numeric" placeholder="All due" aria-label="Maximum company refreshes" />
+                  <small>Source discovery is separate from this company limit.</small>
+                </label>
                 <div class="scan-option-checks">
                   <div class="scan-discovery-addon">
                     <label class="smart-scan-ai-toggle"><input id="smart-scan-use-source-ai" type="checkbox" /><span>Source research via OpenAI</span></label>
@@ -3904,14 +4098,12 @@ function smartScanContentMarkup(status = "") {
               <div class="scan-option-copy">
                 <div class="scan-card-title">
                   <label class="smart-scan-ai-toggle scan-option-toggle"><input id="smart-scan-skip-failures" type="checkbox" /><span>Skip repeat failures</span></label>
-                  ${scanCardHelp("failures", "Repeat failures",
-                  "When enabled, Smart Scan skips a company website or research method once it has at least three actual attempts in the last 7 days and its failure rate meets or exceeds the percentage you set.",
-                  "Core website attempts are counted across company aliases. Research methods have separate histories, so a failing method does not block a healthy one. Reuse and temporary deferrals do not add attempts. Old failures age out, and saved evidence stays available.")}
+                  ${scanCardHelp("failures", "Repeat failures", "Skip a scan method after at least three attempts in seven days if it meets your failure threshold.")}
                 </div>
                 <small class="scan-option-detail">3+ attempts per scan type in the last 7 days</small>
               </div>
               <div class="scan-option-fields">
-                <label class="smart-scan-ai-limit"><span>Min. failure %</span><input id="smart-scan-failure-rate" type="number" inputmode="decimal" min="0" max="100" step="1" value="75" /></label>
+                <label class="smart-scan-ai-limit"><span>Minimum failure rate (%)</span><input id="smart-scan-failure-rate" type="number" inputmode="decimal" min="0" max="100" step="1" value="75" /></label>
               </div>
             </div>
           </div>
@@ -3923,39 +4115,33 @@ function smartScanContentMarkup(status = "") {
               <div class="scan-option-copy">
                 <div class="scan-card-title">
                   <label class="smart-scan-ai-toggle scan-option-toggle"><input id="smart-scan-use-ai" type="checkbox" aria-describedby="smart-scan-ai-description" /><span>AI company review</span></label>
-                  ${scanCardHelp("ai", "AI company review via OpenAI",
-                  "OpenAI reviews a bounded shortlist after the earlier selected research stages. It looks for official-domain recovery and material evidence gaps among strong candidates. A limited subset can use web search to check sources.",
-                  "Top sites caps new reviews. Matching cached results and reviews completed in the past 90 days are skipped, so the next eligible companies can be reviewed. Source research via OpenAI is a separate option for finding discovery sources.")}
+                  ${scanCardHelp("ai", "AI company review via OpenAI", "Use OpenAI to review top companies and fill important evidence gaps.")}
                 </div>
                 <small id="smart-scan-ai-description" class="scan-option-detail"><b>OpenAI</b> · Reviews top matches after other research</small>
                 <small id="smart-scan-ai-estimate" class="scan-option-estimate" hidden></small>
               </div>
               <div class="scan-option-fields">
-                <label class="smart-scan-ai-limit"><span>Top sites</span><input id="smart-scan-ai-sites" type="number" inputmode="numeric" min="1" max="100" step="1" value="100" /></label>
+                <label class="smart-scan-ai-limit"><span>Max AI reviews</span><input id="smart-scan-ai-sites" type="number" inputmode="numeric" min="1" max="100" step="1" value="100" /></label>
               </div>
             </div>
             <div class="scan-option-row smart-scan-seo-card">
               <div class="scan-option-copy">
                 <div class="scan-card-title">
                   <label class="smart-scan-ai-toggle scan-option-toggle"><input id="smart-scan-use-seo" type="checkbox" aria-describedby="smart-scan-seo-description" /><span>Search visibility</span></label>
-                  ${scanCardHelp("seo", "Search visibility via DataForSEO",
-                  "DataForSEO estimates Google search visibility for the top-ranked unique root domains. It checks the selected cohort in bulk, then looks up detailed rankings for a smaller subset. Eligible results can update the Sales priority order.",
-                  "Matching successful bulk and detail results are reused for 90 days. Fresh results are skipped before taking the next ranked domains due for each stage. SEO evidence can count toward scoring for 30 days.")}
+                  ${scanCardHelp("seo", "Search visibility via DataForSEO", "Use DataForSEO to check Google search visibility for ranked company domains.")}
                 </div>
                 <small id="smart-scan-seo-description" class="scan-option-detail"><b>DataForSEO</b> · Checks Google rankings for top sites</small>
                 <small id="smart-scan-seo-estimate" class="scan-option-estimate" hidden></small>
               </div>
               <div class="scan-option-fields">
-                <label class="smart-scan-ai-limit"><span>Top sites</span><input id="smart-scan-seo-sites" type="number" inputmode="numeric" min="1" max="100000" step="1" value="100" /></label>
+                <label class="smart-scan-ai-limit"><span>Max domains to check</span><input id="smart-scan-seo-sites" type="number" inputmode="numeric" min="1" max="100000" step="1" value="100" /></label>
               </div>
             </div>
             <div class="scan-option-row smart-scan-ads-card">
               <div class="scan-option-copy">
                 <div class="scan-card-title">
                   <label class="smart-scan-ai-toggle scan-option-toggle"><input id="smart-scan-use-ads" type="checkbox" aria-describedby="smart-scan-ads-description" /><span>Meta ad research</span></label>
-                  ${scanCardHelp("ads", "Meta ad research via Apify",
-                  "Uses Apify to research Meta ads for eligible companies before AI reviews and people lookup. The scan looks for advertiser-to-company matches and saves attributable ad activity as sales evidence. Max spend caps the authorized provider charge.",
-                  "Completed lookups are reused for 90 days. Failed attempts can become eligible again after 24 hours. This is research on existing companies and does not purchase ad placements.")}
+                  ${scanCardHelp("ads", "Meta ad research via Apify", "Use Apify to check for company-linked Meta ads within your spend limit.")}
                 </div>
                 <small id="smart-scan-ads-description" class="scan-option-detail"><b>Apify</b> · Checks for company-linked Meta ads</small>
                 <small id="smart-scan-ads-cost" class="scan-option-estimate" hidden></small>
@@ -3969,9 +4155,7 @@ function smartScanContentMarkup(status = "") {
               <div class="scan-option-copy">
                 <div class="scan-card-title">
                   <label class="smart-scan-ai-toggle scan-option-toggle"><input id="smart-scan-use-people" type="checkbox" aria-describedby="smart-scan-people-description" /><span>People lookup</span></label>
-                  ${scanCardHelp("treg", "People lookup via Treg",
-                  "Uses Treg to look up professional contacts at the top companies after the other selected research stages. The app checks returned people against company identity, title, seniority and relevant roles.",
-                  "Completed people checks are reused for 90 days, including checks with no qualifying contacts. The Top companies limit is filled with the next eligible companies. Work-email verification is a separate action.")}
+                  ${scanCardHelp("treg", "People lookup via Treg", "Use Treg to find relevant contacts at eligible ranked companies.")}
                 </div>
                 <small id="smart-scan-people-description" class="scan-option-detail"><b>Treg</b> · Finds decision-makers and reuses checks for 90 days</small>
                 <small id="smart-scan-people-scope" class="scan-option-estimate" hidden></small>
@@ -3990,9 +4174,8 @@ function smartScanContentMarkup(status = "") {
         <p id="scan-setup-estimate-text" role="status" hidden></p>
         <div class="scan-setup-actions">
           <button class="button" type="button" data-close-dialog="smart-scan-options-dialog">Close</button>
-          <button class="button" id="scan-setup-estimate" type="button" hidden>Estimate</button>
           <button class="button primary" id="scan-setup-start" type="button" hidden disabled></button>
-          <button class="button primary" id="start-smart-scan" type="button" disabled aria-live="polite">Start Smart Scan</button>
+          <button class="button primary" id="start-smart-scan" type="button" disabled aria-live="polite">Scan</button>
         </div>
       </footer>
     </dialog>
@@ -4000,14 +4183,8 @@ function smartScanContentMarkup(status = "") {
         <div class="smart-scan-phase-head"><span id="smart-scan-phase-label">Checking scan status…</span><strong id="smart-scan-percent">—</strong></div>
         <div class="smart-scan-track" role="progressbar" aria-label="Smart Scan progress" aria-valuemin="0" aria-valuemax="100" id="smart-scan-track"><span id="smart-scan-track-fill"></span></div>
         <div class="smart-scan-toolbar">
-          <span class="smart-scan-status" id="smart-scan-status">${status}</span>
           <div class="smart-scan-toolbar-actions">
             <button class="button" id="clear-smart-scan" type="button" hidden>Clear scan</button>
-            <div class="smart-scan-run-controls" id="smart-scan-run-controls" hidden>
-              <button class="text-button" id="pause-smart-scan" type="button">Pause</button>
-              <button class="text-button" id="resume-smart-scan" type="button" hidden>Resume</button>
-              <button class="text-button danger" id="stop-smart-scan" type="button">Stop</button>
-            </div>
           </div>
         </div>
         <ol class="smart-scan-phases" id="smart-scan-phases" aria-label="Scan steps" hidden></ol>
@@ -4031,7 +4208,7 @@ function smartScanContentMarkup(status = "") {
 
 function smartScanShellMarkup() {
   return `<section class="smart-scan-shell" id="smart-scan-shell" aria-label="Smart Scan" aria-busy="true" data-initial-loading="true">
-    ${smartScanContentMarkup(loadingIndicator("Checking…"))}
+    ${smartScanContentMarkup()}
   </section>`;
 }
 
@@ -4042,6 +4219,12 @@ function smartScanDirectoryProgress(scan = {}) {
 }
 
 function smartScanProgress(scan = {}) {
+  const work = scan.work || {};
+  const active = ["starting", "running", "paused", "reconnecting", "restarting"].includes(scan.status);
+  if (active && Number(work.total) > 0 && scan.progress_basis !== "estimated_work") {
+    // Older Oracle builds publish completed-phase percentages but already report work counts.
+    return Math.max(0, Math.min(99, 100 * Number(work.completed || 0) / Number(work.total)));
+  }
   const exact = Number(scan.progress_percent);
   if (Number.isFinite(exact)) return Math.max(0, Math.min(100, exact));
   const phases = Array.isArray(scan.phases) ? scan.phases : [];
@@ -4082,30 +4265,49 @@ function smartScanElapsedLabel(scan = {}, now = Date.now()) {
   return `${days ? `${days}d ` : ""}${clock}`;
 }
 
-function updateSmartScanActivityClock(currentRow = null) {
-  if (state.smartScanTerminalTab !== "activity" || !smartScanActive()) return;
-  const terminal = $("#smart-terminal-lines");
-  if (!terminal) return;
-  const row = currentRow || terminal.querySelector(".is-current-activity");
-  if (!row) return;
-  for (const previous of terminal.querySelectorAll(".is-current-activity")) {
-    if (previous === row) continue;
-    previous.classList.remove("is-current-activity");
-    const previousTime = previous.querySelector("time");
-    if (previousTime?.dataset.eventTime) previousTime.textContent = previousTime.dataset.eventTime;
+function highlightLatestTerminalActivity(terminal, enabled = true) {
+  let latest = null;
+  let timestamp = -Infinity;
+  if (enabled) {
+    for (const row of terminal.children) {
+      if (!row.matches(".smart-terminal-line:not(.level-error)")) continue;
+      const time = Number(row.dataset.activityTime || 0);
+      if (time < timestamp) continue;
+      latest = row;
+      timestamp = time;
+    }
   }
-  row.classList.add("is-current-activity");
+  for (const previous of terminal.querySelectorAll(".is-current-activity")) {
+    if (previous === latest) continue;
+    previous.classList.remove("is-current-activity");
+    const time = previous.querySelector("time[aria-label]");
+    if (time) {
+      time.textContent = time.dataset.eventTime;
+      time.removeAttribute("aria-label");
+    }
+  }
+  latest?.classList.add("is-current-activity");
+}
+
+function updateSmartScanActivityClock() {
+  if (standaloneScanFocus) return;
+  if (state.smartScanTerminalTab !== "activity" || !smartScanActive() || state.microlinkRunControl) return;
+  const row = $("#smart-terminal-lines [data-live-action].is-current-activity");
+  if (!row) return;
   const time = row.querySelector("time");
   if (!time) return;
   if (!time.dataset.eventTime) time.dataset.eventTime = time.textContent;
-  time.textContent = new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date());
+  const clock = new Intl.DateTimeFormat("en", {
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).format(new Date());
+  if (time.textContent !== clock) time.textContent = clock;
   time.setAttribute("aria-label", "Current time");
 }
 
 function updateSmartScanElapsed() {
   const elapsed = $("#smart-terminal-elapsed");
   if (elapsed) {
-    const scan = state.smartScan || {};
+    const scan = standaloneScanFocus?.run || state.smartScan || {};
     const now = Date.now();
     const total = smartScanElapsedLabel(scan, now);
     const current = smartScanElapsedLabel({
@@ -4125,18 +4327,65 @@ function startSmartScanElapsedTicker() {
   if (smartScanActive()) state.smartScanElapsedTimer = setInterval(updateSmartScanElapsed, 1000);
 }
 
+const terminalRowMarkup = new WeakMap();
+const terminalLastInput = new WeakMap();
+
 function smartScanTerminalNearBottom(terminal) {
-  return terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight < 42;
+  return performance.now() - (terminalLastInput.get(terminal) ?? -Infinity) > 350
+    && terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight <= 2;
+}
+
+function renderTerminalRows(terminal, rows, {keepCurrent = false, follow = false} = {}) {
+  const current = keepCurrent ? terminal.querySelector("[data-live-action]") : null;
+  const existing = [...terminal.children].filter(node => node !== current);
+  if (existing.length === rows.length
+      && existing.every((node, index) => terminalRowMarkup.get(node) === rows[index])) return;
+  const viewportTop = terminal.getBoundingClientRect().top;
+  const retainedMarkup = new Set(rows);
+  const anchor = !follow && existing.find(node => retainedMarkup.has(terminalRowMarkup.get(node))
+    && node.getBoundingClientRect().bottom > viewportTop);
+  const anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
+  const previousScroll = terminal.scrollTop;
+  const available = new Map();
+  for (const node of existing) {
+    const markup = terminalRowMarkup.get(node);
+    if (!available.has(markup)) available.set(markup, []);
+    available.get(markup).push(node);
+  }
+  const template = document.createElement("template");
+  const desired = rows.map(markup => {
+    const reused = available.get(markup)?.shift();
+    if (reused) return reused;
+    template.innerHTML = markup;
+    const node = template.content.firstElementChild;
+    terminalRowMarkup.set(node, markup);
+    return node;
+  });
+  for (const unused of available.values()) for (const node of unused) node.remove();
+  let next = terminal.firstElementChild;
+  for (const node of desired) {
+    if (node === next) next = next.nextElementSibling;
+    else terminal.insertBefore(node, next);
+  }
+  if (follow) terminal.scrollTop = terminal.scrollHeight;
+  else if (anchor?.isConnected) {
+    const shift = anchor.getBoundingClientRect().top - anchorTop;
+    if (Math.abs(shift) >= 1) terminal.scrollTop += shift;
+  } else if (terminal.scrollTop !== previousScroll) {
+    terminal.scrollTop = previousScroll;
+  }
 }
 
 function paintSmartScanCurrentAction(followOutput = null) {
-  if (state.smartScanTerminalTab !== "activity" || !smartScanActive()) return;
+  if (standaloneScanFocus) return;
+  if (state.smartScanTerminalTab !== "activity" || !smartScanActive() || state.microlinkRunControl) return;
   const terminal = $("#smart-terminal-lines");
   if (!terminal) return;
   const shouldFollowOutput = followOutput === null ? smartScanTerminalNearBottom(terminal) : followOutput;
-  let row = terminal.querySelector(".is-current-activity");
+  let row = terminal.querySelector("[data-live-action]");
   if (!state.smartScanCurrentAction) {
     row?.remove();
+    highlightLatestTerminalActivity(terminal);
     return;
   }
   if (!row) {
@@ -4147,18 +4396,25 @@ function paintSmartScanCurrentAction(followOutput = null) {
     row = terminal.querySelector(".smart-terminal-line.level-item:last-child");
   }
   if (!row) return;
-  updateSmartScanActivityClock(row);
+  row.dataset.liveAction = "";
+  row.dataset.activityTime = String(Date.parse(state.smartScanCurrentAction.timestamp) || 0);
+  highlightLatestTerminalActivity(terminal);
+  updateSmartScanActivityClock();
   const message = row.querySelector("strong");
   const detail = row.querySelector("small");
-  if (message) message.textContent = state.smartScanCurrentAction.message || "Working";
-  if (detail) detail.textContent = state.smartScanCurrentAction.detail || "";
-  else if (state.smartScanCurrentAction.detail) {
+  const text = state.smartScanCurrentAction.message || "Working";
+  const detailText = state.smartScanCurrentAction.detail || "";
+  if (message && message.textContent !== text) message.textContent = text;
+  if (detail && detail.textContent !== detailText) detail.textContent = detailText;
+  if (!detail && detailText) {
     row.querySelector("p")?.insertAdjacentHTML(
       "beforeend",
       `<small>${escapeHtml(state.smartScanCurrentAction.detail)}</small>`,
     );
   }
-  if (shouldFollowOutput) terminal.scrollTop = terminal.scrollHeight;
+  if (shouldFollowOutput && terminal.scrollHeight - terminal.scrollTop > terminal.clientHeight + 1) {
+    terminal.scrollTop = terminal.scrollHeight;
+  }
 }
 
 function advanceSmartScanAction() {
@@ -4297,6 +4553,9 @@ function renderSmartScan(scan = {}) {
       state.smartScanSearchTermsDraft = field.value;
       field.setCustomValidity("");
     });
+    $("#smart-scan-due-limit", root).addEventListener("input", event => {
+      state.smartScanDueCompanyLimit = event.target.value ? Number(event.target.value) : null;
+    });
     $("#smart-scan-due-hydration", root).addEventListener("change", event => {
       state.smartScanDueHydrationEnabled = event.currentTarget.checked;
       updateSmartScanLaunchControls();
@@ -4373,10 +4632,20 @@ function renderSmartScan(scan = {}) {
       if (Number.isFinite(value)) state.smartScanFailureRate = value;
       updateSmartScanLaunchControls();
     });
-    $("#pause-smart-scan", root).addEventListener("click", () => controlSmartScan("pause"));
-    $("#resume-smart-scan", root).addEventListener("click", () => state.microlinkRunControl ? state.microlinkRunControl("resume") : controlSmartScan("resume"));
+    $("#pause-resume-smart-scan", root).addEventListener("click", event => {
+      const action = event.currentTarget.value;
+      if (state.microlinkRunControl) void state.microlinkRunControl(action);
+      else void controlSmartScan(action);
+    });
     $("#stop-smart-scan", root).addEventListener("click", () => state.microlinkRunControl ? state.microlinkRunControl("stop") : controlSmartScan("stop"));
     $("#clear-smart-scan", root).addEventListener("click", clearSmartScan);
+    const terminal = $("#smart-terminal-lines", root);
+    for (const type of ["wheel", "touchmove", "pointerdown", "keydown"]) {
+      terminal.addEventListener(type, () => terminalLastInput.set(terminal, performance.now()), {passive:true});
+    }
+    terminal.addEventListener("click", event => {
+      if (event.target.closest("#smart-terminal-more-errors")) void loadSmartScanErrors(false);
+    });
     $("#smart-terminal-activity-tab", root).addEventListener("click", () => selectSmartScanTerminalTab("activity"));
     $("#smart-terminal-errors-tab", root).addEventListener("click", () => selectSmartScanTerminalTab("errors"));
     $("#copy-smart-scan-errors", root).addEventListener("click", copySmartScanErrors);
@@ -4403,7 +4672,9 @@ function renderSmartScan(scan = {}) {
   const status = String(scan.status || "idle").toLowerCase();
   const scanFinished = ["complete", "partial"].includes(status);
   const completionMessage = "Smart Scan completed";
-  const phases = Array.isArray(scan.phases) ? scan.phases : [];
+  const initializing = smartScanInitializing(scan);
+  const phases = Array.isArray(scan.phases) && scan.phases.length ? scan.phases
+    : initializing ? [{id: "planning", label: "Quantify backlog"}] : [];
   const progress = smartScanProgress(scan);
   const counters = scan.counters || {};
   root.dataset.status = status;
@@ -4437,9 +4708,12 @@ function renderSmartScan(scan = {}) {
   const isTerminal = ["complete", "partial", "failed", "stopped"].includes(status);
   const clearButton = $("#clear-smart-scan");
   clearButton.hidden = !isTerminal || scan.cleaning_up === true;
+  const clearHost = isTerminal ? $(".smart-scan-phase-head") : $(".smart-scan-toolbar-actions");
+  if (clearButton.parentElement !== clearHost) clearHost.append(clearButton);
   clearButton.disabled = state.smartScanControlPending || state.smartScanStarting || smartScanBusy(scan) || Boolean(scan.external_source_runs?.length);
   if (!state.smartScanControlsInitialized) {
     state.smartScanDueHydrationEnabled = !active || scan.due_hydration_enabled !== false;
+    state.smartScanDueCompanyLimit = active ? scan.due_company_limit ?? null : null;
     state.smartScanAdsEnabled = Boolean(active && scan.paid_ads_enabled);
     state.smartScanAdsCompanyLimit = active ? Number(scan.paid_ads_company_limit || 100) : 100;
     state.smartScanAdsMaxUSD = active ? Number(scan.paid_ads_max_usd || 5) : 5;
@@ -4457,36 +4731,33 @@ function renderSmartScan(scan = {}) {
     state.smartScanFailureRate = Number(scan.max_company_failure_rate ?? 75);
     state.smartScanControlsInitialized = true;
   }
-  const statusRoot = $("#smart-scan-status");
-  const controlStates = new Set(["reconnecting", "pausing", "paused", "restarting", "stopping"]);
   const sourceActive = Boolean(scan.external_source_runs?.length);
-  const visibleStatus = scan.cleaning_up ? "Finishing cleanup in background"
-    : !active && sourceActive ? "Source scan running" : controlStates.has(status) ? status : active ? scan.phase || status : status === "idle" ? "READY" : status;
-  statusRoot.className = `smart-scan-status status-${escapeHtml(status)}`;
-  statusRoot.innerHTML = `<i></i> ${escapeHtml(humanize(visibleStatus))}`;
   updateSmartScanLaunchControls(scan);
   const controlStatus = String(scan.control_status || "").toLowerCase();
   const controls = $("#smart-scan-run-controls");
-  controls.hidden = Boolean(scan.cleaning_up || scan.preparing || (!active && !sourceActive));
-  $("#pause-smart-scan").hidden = !active || controlStatus === "paused" || status === "paused";
-  $("#resume-smart-scan").hidden = !(controlStatus === "paused" || status === "paused");
-  $("#pause-smart-scan").disabled = state.smartScanControlPending || status === "pausing" || status === "stopping";
-  $("#resume-smart-scan").disabled = state.smartScanControlPending || status === "stopping";
+  controls.hidden = Boolean(scan.cleaning_up || (!initializing && !active && !sourceActive));
+  const paused = !initializing && (controlStatus === "paused" || status === "paused");
+  const pauseResume = $("#pause-resume-smart-scan");
+  pauseResume.value = paused ? "resume" : "pause";
+  pauseResume.textContent = paused ? "Resume" : "Pause";
+  pauseResume.hidden = !initializing && !active && !paused;
+  pauseResume.disabled = initializing || state.smartScanControlPending || status === "pausing" || status === "stopping";
   const stopButton = $("#stop-smart-scan");
   stopButton.hidden = scan.cleaning_up === true;
-  stopButton.disabled = Boolean(scan.cleaning_up || state.smartScanControlPending || status === "stopping");
+  stopButton.disabled = Boolean(initializing || scan.cleaning_up || state.smartScanControlPending || status === "stopping");
   const directoryProgress = smartScanDirectoryProgress(scan);
   $("#smart-scan-phase-label").textContent = scanFinished ? completionMessage
     : [scan.message || "Ready to scan", scan.phase === "source_execution" ? directoryProgress : ""].filter(Boolean).join(" · ");
-  $("#smart-scan-percent").textContent = `${progress.toFixed(0)}%`;
+  const percentText = `${Number(progress.toFixed(2))}%`;
+  const progressLabel = Number(scan.work?.total) > 0
+    ? "Estimated share of planned work attempted; the plan can change as work is discovered"
+    : "Scan progress";
+  $("#smart-scan-percent").textContent = percentText;
   $("#smart-scan-track-fill").style.width = `${progress}%`;
-  $("#smart-scan-track").setAttribute("aria-valuenow", progress.toFixed(0));
-  $("#smart-scan-track").setAttribute("aria-valuetext", scan.progress_basis === "completed_phases"
-    ? `${progress.toFixed(0)}% of scan phases completed; remaining time is unknown`
-    : `${progress.toFixed(0)}%`);
-  $("#smart-scan-track").setAttribute("title", scan.progress_basis === "completed_phases"
-    ? "Completed scan phases; remaining time is unknown" : "Scan progress");
-  const currentIndex = Number(scan.phase_index || 0);
+  $("#smart-scan-track").setAttribute("aria-valuenow", String(progress));
+  $("#smart-scan-track").setAttribute("aria-valuetext", `${percentText} · ${progressLabel}`);
+  $("#smart-scan-track").setAttribute("title", progressLabel);
+  const currentIndex = Number(scan.phase_index || (initializing ? 1 : 0));
   const idle = status === "idle";
   const dueHydration = idle ? state.smartScanDueHydrationEnabled : scan.due_hydration_enabled;
   const microlinkEnabled = idle
@@ -4513,34 +4784,41 @@ function renderSmartScan(scan = {}) {
   const firstNeighbor = enabledSteps.findLast(step => step.number < focus?.number)?.number ?? focus?.number ?? 1;
   const lastCurrent = currentSteps.at(-1) ?? focus;
   const lastNeighbor = enabledSteps.find(step => step.number > lastCurrent?.number)?.number ?? lastCurrent?.number ?? 0;
-  const first = firstNeighbor === 2 ? 1 : firstNeighbor;
-  const last = lastNeighbor === steps.length - 1 ? steps.length : lastNeighbor;
+  const fullTimeline = scanFinished || idle;
+  const pastCount = fullTimeline ? 0 : enabledSteps.filter(step => step.number < firstNeighbor).length;
+  const upcomingCount = fullTimeline ? 0 : enabledSteps.filter(step => step.number > lastNeighbor).length;
+  const first = pastCount > 1 ? firstNeighbor : (enabledSteps[0]?.number ?? 1);
+  const last = upcomingCount > 1 ? lastNeighbor : (enabledSteps.at(-1)?.number ?? 0);
   const phaseList = $("#smart-scan-phases");
-  phaseList.hidden = steps.length === 0;
-  const phaseGroup = (group, count, state, glyph) => count ? `<li class="${state} phase-group"><i aria-hidden="true">${glyph}</i><button type="button" data-phase-group="${group}" aria-expanded="false"><strong>${count} steps</strong><span class="sr-only"> ${group === "past" ? "completed" : "upcoming"}</span></button></li>` : "";
-  const phaseMarkup = phaseGroup("past", first - 1, "complete", "✓") + steps.map(({phase, number, off, finished, current}) => {
+  phaseList.hidden = enabledSteps.length === 0;
+  phaseList.dataset.finished = String(scanFinished);
+  const phaseGroup = (group, count, state, glyph) => count > 1 ? `<li class="${state} phase-group"><i aria-hidden="true">${glyph}</i><button type="button" data-phase-group="${group}" aria-expanded="false"><strong>${scanFinished && group === "past" ? `View completed steps · ${count}` : `+${count} steps`}</strong><span class="sr-only"> ${group === "past" ? "completed" : "upcoming"}</span></button></li>` : "";
+  const phaseMarkup = phaseGroup("past", pastCount, "complete", "✓") + enabledSteps.map(({phase, number, off, finished, current}) => {
     const group = number < first ? " phase-past" : number > last ? " phase-upcoming" : "";
     const phaseState = off ? "pending" : finished ? "complete" : current ? "active" : "pending";
-    const label = off ? "Off" : finished ? "Finished" : current && ["paused", "stopped", "pausing"].includes(status) ? humanize(status) : current && status === "failed" ? "Stopped" : current && scan.preparing ? "Preparing" : current && active ? "Scanning" : "Waiting";
+    const label = off ? "Off" : finished ? "Finished" : current && ["paused", "stopped", "pausing"].includes(status) ? humanize(status) : current && status === "failed" ? "Stopped" : current && initializing ? "Preparing" : current && active ? "Scanning" : "Waiting";
     const glyph = off ? "−" : finished ? "✓" : current ? "●" : "○";
     const pulsing = label === "Scanning" || label === "Preparing";
-    const collapseGroup = number === 1 && number < first ? "past"
-      : number === steps.length && number > last ? "upcoming" : "";
+    const collapseGroup = number === enabledSteps[0]?.number && number < first ? "past"
+      : number === enabledSteps.at(-1)?.number && number > last ? "upcoming" : "";
     const collapse = collapseGroup ? `<button class="icon-button phase-collapse" type="button" data-phase-group="${collapseGroup}" data-collapse aria-expanded="true" aria-label="Collapse ${collapseGroup === "past" ? "completed" : "upcoming"} steps" title="Collapse steps">⌃</button>` : "";
     return `<li class="${phaseState}${pulsing ? " is-pulsing" : ""}${group}"><i>${glyph}</i><span><strong>${escapeHtml(phase.label)}</strong><small>${escapeHtml([label, phase.id === "source_execution" && !off ? directoryProgress : ""].filter(Boolean).join(" · "))}</small></span>${collapse}</li>`;
-  }).join("") + phaseGroup("upcoming", steps.length - last, "pending", "○");
+  }).join("") + phaseGroup("upcoming", upcomingCount, "pending", "○");
   // Keep the orb in place between status polls when the timeline is unchanged.
   if (phaseList.dataset.renderedMarkup !== phaseMarkup) {
     phaseList.innerHTML = phaseMarkup;
     phaseList.dataset.renderedMarkup = phaseMarkup;
   }
   const work = scan.work || {};
+  const attemptedWork = Number(work.completed || 0) + Number(work.in_flight || 0);
+  const plannedWork = Math.max(Number(work.total || 0), attemptedWork);
   $("#smart-scan-note").textContent = scan.preparing
     ? "Preparing the exact scan plan…"
     : active
-      ? `${formatNumber(work.completed || 0)} / ${formatNumber(work.total || 0)} work items · ${formatNumber(counters.hydration_hosts_submitted || 0)} due records submitted · ${formatNumber(counters.scanner_hosts_submitted || 0)} scanner-gap records.`
+      ? `${formatNumber(attemptedWork)} / ${formatNumber(plannedWork)} planned items attempted · ${formatNumber(counters.hydration_hosts_submitted || 0)} due records submitted · ${formatNumber(counters.scanner_hosts_submitted || 0)} scanner-gap records.`
     : scan.inventory_pending ? scan.inventory_error ? "Inventory unavailable" : scan.inventory_progress || "Updating inventory…"
     : "";
+  if (!root.dispatchEvent(new Event("microlink-render", {cancelable:true}))) return;
   $("#smart-terminal-error-count").textContent = formatNumber(scan.error_total || 0);
   $("#smart-terminal-activity-tab").setAttribute("aria-selected", String(state.smartScanTerminalTab === "activity"));
   $("#smart-terminal-errors-tab").setAttribute("aria-selected", String(state.smartScanTerminalTab === "errors"));
@@ -4556,22 +4834,26 @@ function renderSmartScan(scan = {}) {
         results: smartScanCompletionResults(scan) }
       : event);
   const terminal = $("#smart-terminal-lines");
-  delete terminal.dataset.microlinkContent;
   const followOutput = smartScanTerminalNearBottom(terminal);
+  const meta = $("#smart-terminal-meta");
   if (state.smartScanTerminalTab === "errors") {
-    terminal.innerHTML = state.smartScanErrors.length ? state.smartScanErrors.map(error => smartScanTerminalLine({ ...error, level: "error" })).join("") : `<div class="smart-terminal-empty"><span>✓</span> No failures recorded for this Smart Scan.</div>`;
-    if (state.smartScanErrorsHasMore) terminal.insertAdjacentHTML("beforeend", `<button class="smart-terminal-more" id="smart-terminal-more-errors" type="button">Load older failures</button>`);
-    $("#smart-terminal-more-errors")?.addEventListener("click", () => loadSmartScanErrors(false));
-    $("#smart-terminal-meta").textContent = `${formatNumber(state.smartScanErrors.length)} / ${formatNumber(state.smartScanErrorTotal)} failures`;
-    if (state.smartScanErrorsLoading) $("#smart-terminal-meta").innerHTML = loadingIndicator("Loading failures…");
+    const rows = state.smartScanErrors.length
+      ? state.smartScanErrors.map(error => smartScanTerminalLine({ ...error, level: "error" }))
+      : ['<div class="smart-terminal-empty"><span>✓</span> No failures recorded for this Smart Scan.</div>'];
+    if (state.smartScanErrorsHasMore) rows.push('<button class="smart-terminal-more" id="smart-terminal-more-errors" type="button">Load older failures</button>');
+    renderTerminalRows(terminal, rows);
+    const text = `${formatNumber(state.smartScanErrors.length)} / ${formatNumber(state.smartScanErrorTotal)} failures`;
+    if (state.smartScanErrorsLoading) {
+      if (!meta.querySelector(".loading-indicator")) meta.innerHTML = loadingIndicator("Loading failures…");
+    } else if (meta.textContent !== text || meta.firstElementChild) meta.textContent = text;
   } else {
-    terminal.innerHTML = events.length || active ? events.map(smartScanTerminalLine).join("") : `<div class="smart-terminal-empty"><span>›</span> Ready to scan.</div>`;
-    paintSmartScanCurrentAction(followOutput);
-    updateSmartScanActivityClock();
-    if (followOutput) terminal.scrollTop = terminal.scrollHeight;
-    $("#smart-terminal-meta").textContent = "";
+    const rows = events.length || active ? events.map(smartScanTerminalLine)
+      : ['<div class="smart-terminal-empty"><span>›</span> Ready to scan.</div>'];
+    renderTerminalRows(terminal, rows, {keepCurrent:active, follow:followOutput});
+    if (active) paintSmartScanCurrentAction(followOutput);
+    else highlightLatestTerminalActivity(terminal, false);
+    if (meta.textContent) meta.textContent = "";
   }
-  root.dispatchEvent(new Event("microlink-render"));
   renderAggregateScanState();
 }
 
@@ -4604,16 +4886,17 @@ function smartScanCompletionResults(scan) {
 }
 
 function smartScanTerminalLine(event = {}) {
-  const time = event.timestamp ? new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(event.timestamp)) : "--:--:--";
+  const timestamp = Date.parse(event.timestamp) || 0;
+  const time = timestamp ? new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(timestamp) : "--:--:--";
   const glyph = event.level === "error" ? "!" : event.level === "success" ? "✓" : event.level === "item" ? "↳" : "›";
   const results = (event.results || []).map(({label, summary}) =>
     `<small class="smart-terminal-result"><b>${escapeHtml(label)}</b> · ${escapeHtml(summary)}</small>`).join("");
-  return `<div class="smart-terminal-line level-${escapeHtml(event.level || "info")}"><time>${escapeHtml(time)}</time><span class="terminal-glyph">${glyph}</span><p><strong>${escapeHtml(event.message || "Update")}</strong>${event.detail ? `<small>${escapeHtml(event.detail)}</small>` : ""}${event.query ? `<small data-verbatim>${escapeHtml(event.query)}</small>` : ""}${results}</p></div>`;
+  return `<div class="smart-terminal-line level-${escapeHtml(event.level || "info")}" data-activity-time="${timestamp}"><time>${escapeHtml(time)}</time><span class="terminal-glyph">${glyph}</span><p><strong>${escapeHtml(event.message || "Update")}</strong>${event.detail ? `<small>${escapeHtml(event.detail)}</small>` : ""}${event.query ? `<small data-verbatim>${escapeHtml(event.query)}</small>` : ""}${results}</p></div>`;
 }
 
 async function copySmartScanErrors() {
   const errors = state.microlinkVisibleErrors ?? state.smartScanErrors;
-  if (!errors.length) return showToast("No failures to copy");
+  if (!errors.length) return showToast("No failures to copy", "info");
   const text = errors.map(error => [
     error.timestamp || "",
     error.message || "Failure",
@@ -4627,7 +4910,7 @@ async function copySmartScanErrors() {
 async function selectSmartScanTerminalTab(tab) {
   state.smartScanTerminalTab = tab === "errors" ? "errors" : "activity";
   renderSmartScan(state.smartScan || {});
-  if (state.smartScanTerminalTab === "errors" && !state.microlinkRunControl) await loadSmartScanErrors(true);
+  if (state.smartScanTerminalTab === "errors" && !state.microlinkRunControl && !standaloneScanFocus) await loadSmartScanErrors(true);
 }
 
 async function loadSmartScanErrors(reset = false) {
@@ -4652,7 +4935,7 @@ async function loadSmartScanErrors(reset = false) {
     state.smartScanErrorsHasMore = Boolean(data.has_more);
     if (state.smartScan) state.smartScan.error_total = Number(data.operational_total ?? data.total ?? 0);
   } catch (error) {
-    if (current()) showToast(error.message);
+    if (current()) showToast(error.message, "error");
   } finally {
     if (current()) {
       state.smartScanErrorsLoading = false;
@@ -4664,7 +4947,7 @@ async function loadSmartScanErrors(reset = false) {
 async function controlSmartScan(action) {
   const previous = state.smartScan || {};
   const paused = previous.status === "paused" || previous.control_status === "paused";
-  if (state.smartScanControlPending || previous.cleaning_up || (!smartScanActive(previous) && !(action === "stop" && previous.external_source_runs?.length)) || previous.status === "stopping"
+  if (smartScanInitializing(previous) || state.smartScanControlPending || previous.cleaning_up || (!smartScanActive(previous) && !(action === "stop" && previous.external_source_runs?.length)) || previous.status === "stopping"
       || !["pause", "resume", "stop"].includes(action)
       || (action === "resume" ? !paused : action === "pause" && paused)) return;
   state.smartScanControlPending = true;
@@ -4682,7 +4965,7 @@ async function controlSmartScan(action) {
     else if (action === "stop") void pollScanStatus();
   } catch (error) {
     renderSmartScan(previous);
-    showToast(error.message);
+    showToast(error.message, "error");
   } finally {
     state.smartScanControlPending = false;
     renderSmartScan(state.smartScan || {});
@@ -4709,7 +4992,7 @@ async function clearSmartScan() {
     void refreshSmartScanInventory(scan, generation);
   } catch (error) {
     renderSmartScan(previous);
-    showToast(error.message);
+    showToast(error.message, "error");
     if (previous.inventory_pending) void refreshSmartScanInventory(previous, generation);
   } finally {
     state.smartScanControlPending = false;
@@ -4762,7 +5045,7 @@ async function refreshSmartScanInventory(scan, generation) {
       renderSmartScan({ ...scan, inventory_error: true, inventory_transport_error: true });
       showToast(error.name === "TimeoutError"
         ? "Inventory check timed out. Use Retry inventory check; saved work is preserved."
-        : error.message);
+        : error.message, "error");
     }
     state.initializedViews.delete("smart_scan");
   } finally {
@@ -4799,14 +5082,12 @@ async function loadSmartScan() {
       }
       clearLoadingIndicators("#smart-scan-shell");
       $("#smart-scan-shell")?.setAttribute("aria-busy", "false");
-      const status = $("#smart-scan-status");
-      if (status) status.textContent = "Unavailable";
       if (shell.dataset.initialLoading === "true") {
         $(".smart-scan-summary", shell)?.setAttribute("aria-busy", "false");
         $("#smart-scan-phase-label", shell).textContent = "Scan status unavailable";
         $("#smart-scan-due-note", shell).textContent = "Inventory unavailable";
       }
-      showToast(error.message);
+      showToast(error.message, "error");
     }
   } finally {
     if (generation === smartScanLoadGeneration) {
@@ -4818,6 +5099,9 @@ async function loadSmartScan() {
 
 async function startSmartScan() {
   if (smartScanLaunchBlocked() || scanActionBlocked($("#start-smart-scan"))) return;
+  const refreshLimit = $("#smart-scan-due-limit");
+  if (state.smartScanDueHydrationEnabled && refreshLimit && !refreshLimit.reportValidity()) return;
+
   const searchTerms = $("#smart-scan-discovery-terms");
   const terms = searchTerms && !searchTerms.disabled
     ? (searchTerms.value || "").split(/\r?\n/).map(term => term.trim().replace(/\s+/g, " ")).filter(Boolean)
@@ -4846,6 +5130,7 @@ async function startSmartScan() {
     ...previous, id: null, status: "starting", phase: "planning", preparing: true,
     finished_at: null, resumed_after_restart_at: null,
     due_hydration_enabled: state.smartScanDueHydrationEnabled,
+    due_company_limit: state.smartScanDueCompanyLimit ?? null,
     paid_ads_enabled: Boolean(state.smartScanAdsEnabled),
     paid_ads_company_limit: state.smartScanAdsCompanyLimit,
     paid_ads_max_usd: state.smartScanAdsMaxUSD,
@@ -4870,8 +5155,11 @@ async function startSmartScan() {
     const scan = await api("/api/smart-scan", {
       method: "POST",
       body: JSON.stringify({
+        mission_id:selectedScanMission(),
         search_terms: [...new Set(terms)],
         due_hydration_enabled: state.smartScanDueHydrationEnabled,
+        ...(state.smartScanDueHydrationEnabled && state.smartScanDueCompanyLimit != null
+          ? {due_company_limit:state.smartScanDueCompanyLimit} : {}),
         ...(previous.profile?.paid_ads_included ? {
           paid_ads_enabled: Boolean(state.smartScanAdsEnabled),
           paid_ads_company_limit: state.smartScanAdsEnabled ? state.smartScanAdsCompanyLimit : 100,
@@ -4896,7 +5184,7 @@ async function startSmartScan() {
     showToast("Smart Scan started");
   } catch (error) {
     renderSmartScan(previous);
-    showToast(error.message);
+    showToast(error.message, "error");
   } finally {
     state.smartScanStarting = false;
     ++smartScanLoadGeneration;
@@ -4939,7 +5227,7 @@ async function pollSmartScan() {
       state.smartScanPollTimer = setTimeout(pollSmartScan, 500);
     } else if (wasActive) {
       if (scan.status === "stopped") void pollScanStatus();
-      showToast(scan.message || "Smart Scan finished");
+      showToast(scan.message || "Smart Scan finished", scanToastTone(scan.status));
       await refreshVisibleData();
       if (scan.inventory_pending) void refreshSmartScanInventory(scan, generation);
     }
@@ -4950,19 +5238,19 @@ async function pollSmartScan() {
   }
 }
 
-function intelligenceShell() {
+function scanMethodsShell() {
   state.webScanEstimate = null;
   state.adDiscoveryEstimate = null;
-  $("#view-intelligence").innerHTML = `
+  $("#scan-methods-content").innerHTML = `
     ${discoveryTabListMarkup()}
     <section ${discoveryPanelAttributes("web_ct")}>
     <div class="web-scan-layout">
       <form class="panel web-scan-builder" id="web-scan-form">
-        <div class="panel-head"><h3>Web &amp; CT scan</h3><span class="badge moss">Public retrieval $0</span></div>
+        <div class="panel-head"><div class="scan-card-title"><h3>Web &amp; CT scan</h3>${scanCardHelp("web-ct", "Web & CT", SCAN_METHOD_HELP.web_ct)}</div><span class="badge moss">Public retrieval $0</span></div>
         <div class="web-scan-body">
           <div class="web-scan-fields">
-            <label class="field"><span>Names / source</span><input name="max_hosts_per_source" type="number" min="1" max="10000" value="10000" required /></label>
-            <label class="field"><span>Website inspections</span><input name="max_network_inspections" type="number" min="1" max="10000" value="1000" required /></label>
+            <label class="field"><span>Max hostnames per source</span><input name="max_hosts_per_source" type="number" min="1" max="10000" value="10000" required /></label>
+            <label class="field"><span>Max website inspections</span><input name="max_network_inspections" type="number" min="1" max="10000" value="1000" required /></label>
           </div>
           <div class="web-scan-fixed"><label class="paid-check" title="Required scan policy"><input type="checkbox" checked disabled /><span>English only</span></label></div>
           <div class="paid-check-grid">
@@ -4972,7 +5260,6 @@ function intelligenceShell() {
             <label class="paid-check"><input name="microlink_enabled" type="checkbox" /><span>Microlink fallback · paid usage</span></label>
           </div>
         </div>
-        <footer class="paid-form-actions"><button class="button primary" type="submit" id="estimate-web-scan">Estimate</button></footer>
       </form>
       <aside class="panel web-scan-quote" id="web-scan-quote" aria-live="polite" hidden></aside>
     </div>
@@ -4981,13 +5268,12 @@ function intelligenceShell() {
     <section ${discoveryPanelAttributes("paid_ads")}>
     <div class="paid-discovery-layout">
       <form class="panel paid-discovery-builder" id="paid-discovery-form">
-        <div class="panel-head"><h3>Paid advertising</h3><div class="paid-discovery-states"><span class="badge" id="paid-discovery-backlog-state">Checking backlog…</span><span class="badge" id="paid-discovery-key-state">Checking Apify…</span></div></div>
+        <div class="panel-head"><div class="scan-card-title"><h3>Paid advertising</h3>${scanCardHelp("paid-ads", "Paid advertising", SCAN_METHOD_HELP.paid_ads)}</div><div class="paid-discovery-states"><span class="badge" id="paid-discovery-backlog-state">Checking backlog…</span><span class="badge" id="paid-discovery-key-state">Checking Apify…</span></div></div>
         <div class="paid-form-body">
           <p class="paid-discovery-backlog-copy" id="paid-discovery-backlog-copy">Loading the existing-target Meta scan inventory…</p>
-          <p class="form-note">Use public ads to measure verified creative-group refresh and sustained cadence. Campaign structure, optimization events, conversion volume, and performance remain private discovery facts.</p>
           <div class="paid-field-grid">
             <label class="field"><span>Mode</span><select name="mode"><option value="discover" selected>Discover new companies</option><option value="hydrate">Hydrate existing targets</option><option value="both">Discover + hydrate existing</option></select></label>
-            <label class="field"><span>Country</span><input name="country" value="US" maxlength="3" pattern="([A-Za-z]{2}|[Aa][Ll][Ll])" required autocomplete="off" /></label>
+            <label class="field"><span>Country code or ALL</span><input name="country" value="US" maxlength="3" pattern="([A-Za-z]{2}|[Aa][Ll][Ll])" required autocomplete="off" /></label>
             <label class="field paid-query-field"><span>Meta keyword missions · one per line</span><textarea name="meta_queries" rows="4" placeholder="subscription skincare&#10;mobile game" spellcheck="false">${escapeHtml(DEFAULT_META_DISCOVERY_QUERIES.join("\n"))}</textarea></label>
           </div>
           <fieldset class="paid-fieldset">
@@ -5023,7 +5309,6 @@ function intelligenceShell() {
           </fieldset>
           <label class="field paid-budget-field"><span>Maximum provider spend · USD</span><div><span>$</span><input name="max_total_charge_usd" type="number" min="0.10" max="100" step="0.10" value="100.00" required /></div></label>
         </div>
-        <footer class="paid-form-actions"><button class="button primary" type="submit" id="estimate-paid-discovery">Estimate cost</button></footer>
       </form>
       <aside class="panel paid-quote-panel" id="paid-discovery-quote" aria-live="polite" hidden></aside>
     </div>
@@ -5033,60 +5318,104 @@ function intelligenceShell() {
         <div class="panel-head"><div><h3>Advertiser ↔ domain review</h3><span class="section-meta" id="paid-link-count">Loading…</span></div><label class="compact-field"><span>State</span><select id="paid-link-filter"><option value="all">All</option><option value="verified">Verified</option><option value="probable">Probable</option><option value="ambiguous">Ambiguous</option><option value="rejected">Rejected</option></select></label></div>
         <div class="table-wrap"><table class="paid-link-table"><thead><tr><th>Advertiser</th><th>Domain</th><th>Identity</th><th>Evidence</th><th>Candidate</th><th></th></tr></thead><tbody id="paid-link-body"><tr><td colspan="6" class="loading-row">${loadingIndicator()}</td></tr></tbody></table></div>
       </section>
-      <section class="panel paid-history-panel">
-        <div class="panel-head"><h3>Paid scan history</h3><span class="section-meta" id="paid-history-count">—</span></div>
-        <div class="paid-history-list" id="paid-history-list"><p class="empty">${loadingIndicator()}</p></div>
-      </section>
     </div>
     </section>
     <section ${discoveryPanelAttributes("find_sources")}>
-      <div class="discovery-scout-controls panel">
-        <strong>AI source scout</strong><small>OpenAI usage · bounded by the selected web-call limit</small>
+      <section class="discovery-scout-controls panel">
+        <header class="panel-head"><div><h3>AI source scout</h3><p>OpenAI usage · capped by your web-call limit</p></div><span class="badge" id="scout-state" data-scout-state>Idle</span></header>
         <form id="source-scout-form" data-source-scout-form>
-          <label><span>Suggestions</span><input name="max_suggestions" type="number" min="1" max="12" value="12" required /></label>
-          <label><span>Web calls</span><input name="max_tool_calls" type="number" min="1" max="10" value="10" required /></label>
+          <label><span>Max suggestions</span><input name="max_suggestions" type="number" min="1" max="12" value="12" required /></label>
+          <label><span>Max OpenAI web calls</span><input name="max_tool_calls" type="number" min="1" max="10" value="10" required /></label>
           <button class="button primary" id="run-source-scout" data-source-scout-start="custom" type="submit" disabled>Checking readiness…</button>
         </form>
-      </div>
-      <div class="source-review-head"><h3>Pending source ideas</h3><span class="section-meta" id="scout-state" data-scout-state>Idle</span></div>
-      <div class="scout-message" id="scout-message" data-scout-message aria-live="polite"><span>Loading scout state…</span></div>
-      <div class="intelligence-stats" id="intelligence-stats" data-scout-stats></div>
-      <section class="panel table-wrap"><table class="source-table">
+      </section>
+      <div class="scout-message" id="scout-message" data-scout-message aria-live="polite" hidden></div>
+      <section class="panel scout-results-panel">
+      <header class="panel-head"><h3>Source ideas</h3><div class="intelligence-stats" id="intelligence-stats" data-scout-stats></div></header>
+      <div class="table-wrap"><table class="source-table">
         <thead><tr><th>Source</th><th>Kind</th><th>Score</th><th>Mechanism</th><th>Evidence</th><th>Status</th><th></th></tr></thead>
         <tbody id="suggestion-body" data-suggestion-body><tr><td colspan="7" class="loading-row">${loadingIndicator()}</td></tr></tbody>
-      </table></section>
+      </table></div></section>
     </section>`;
+  addScanFieldHelp($("#scan-methods-content"));
   const webForm = $("#web-scan-form");
-  webForm.addEventListener("submit", estimateWebScan);
-  webForm.addEventListener("input", invalidateWebScanEstimate);
-  webForm.addEventListener("change", invalidateWebScanEstimate);
+  syncDiscoveryProviderChoices();
+  bindAutomaticScanEstimate(webForm, estimateWebScan, invalidateWebScanEstimate);
   const paidForm = $("#paid-discovery-form");
-  paidForm.addEventListener("submit", estimateAdDiscovery);
-  paidForm.addEventListener("input", handleAdDiscoveryDraftChange);
-  paidForm.addEventListener("change", handleAdDiscoveryDraftChange);
+  bindAutomaticScanEstimate(paidForm, estimateAdDiscovery, handleAdDiscoveryDraftChange);
   $("#paid-link-filter").addEventListener("change", event => {
     state.adDiscoveryLinkFilter = event.target.value;
     renderAdDiscoveryLinks();
   });
   $("#source-scout-form").addEventListener("submit", startSourceScout);
-  $("#start-smart-scan")?.addEventListener("click", startSmartScan);
+  syncAdDiscoveryForm();
+  enhanceMultiChecklists($("#scan-methods-content"));
+  const dialog = $("#smart-scan-options-dialog");
+  let navigation = $(".scan-pinned-navigation", dialog);
+  if (!navigation) {
+    navigation = document.createElement("div");
+    navigation.className = "scan-pinned-navigation";
+    $(".modal-head", dialog).append(navigation);
+  }
+  const presets = document.createElement("div");
+  presets.className = "scan-preset-picker";
+  presets.setAttribute("role", "group");
+  presets.setAttribute("aria-label", "Scan presets");
+  presets.append($("#scan-basic-option", dialog), $("#saved-scan-goals", dialog));
+  const tabs = $(".discovery-tabs", dialog);
+  const firstMethod = $("[data-discovery-tab]", tabs);
+  for (const [id, label] of SCAN_SECTION_LINKS) {
+    const section = $(`#${id}`, dialog).closest(".scan-research-panel");
+    section.id = `${id}-section`;
+    const link = document.createElement("button");
+    link.type = "button";
+    link.className = "discovery-tab scan-section-link";
+    link.textContent = label;
+    link.setAttribute("aria-controls", section.id);
+    link.dataset.discoveryTab = id;
+    tabs.insertBefore(link, firstMethod);
+  }
   bindDiscoveryTabs();
   selectDiscoveryTab(state.discoveryTab);
-  syncAdDiscoveryForm();
-  enhanceMultiChecklists($("#view-intelligence"));
+  navigation.append($("#scan-goal-form", dialog), presets, $(".discovery-tab-shell", dialog));
+  if (!$("#find-directories-dialog")) {
+    const scoutDialog = document.createElement("dialog");
+    scoutDialog.id = "find-directories-dialog";
+    scoutDialog.className = "modal smart-scan-options-dialog standalone-scan-dialog";
+    scoutDialog.dataset.scanMode = "sources";
+    scoutDialog.setAttribute("aria-labelledby", "find-directories-title");
+    scoutDialog.innerHTML = `<header class="modal-head"><h2 id="find-directories-title" tabindex="-1" autofocus>Find directories</h2><button type="button" class="icon-button" data-close-dialog="find-directories-dialog" aria-label="Close find directories">×</button></header><div class="modal-body scan-setup-body"></div><footer class="modal-actions"><button class="button" type="button" data-close-dialog="find-directories-dialog">Close</button></footer>`;
+    const panel = $("#discovery-panel-find_sources", dialog);
+    panel.removeAttribute("data-discovery-panel");
+    panel.removeAttribute("aria-labelledby");
+    panel.className = "source-scout-content";
+    panel.hidden = false;
+    $(".scan-setup-body", scoutDialog).append(panel);
+    dialog.parentElement.append(scoutDialog);
+    bindScanCardHelp(scoutDialog);
+  }
+
+}
+
+function syncScanGoalHelper(dialog, mode) {
+  const helper = $("#scan-goal-form", dialog);
+  if (helper) helper.hidden = mode !== "smart";
 }
 
 function setScanImportMode(importing) {
-  $("#scan-smart-mode").hidden = importing;
-  $("#import-scan-form").hidden = !importing;
-  if (importing) $("#import-scan-form").elements.urls.focus();
-  else $("#import-companies-trigger").focus();
+  const dialog = $("#import-companies-dialog");
+  if (importing) {
+    if (!dialog.open) dialog.showModal();
+    $("#import-scan-form").elements.urls.focus({preventScroll:true});
+  } else {
+    if (dialog.open) dialog.close();
+    $("#import-companies-trigger").focus({preventScroll:true});
+  }
 }
 
 function bindMicrolinkScanBar(root) {
-  const status = $("#smart-scan-status", root);
   const stop = $("#stop-smart-scan", root);
-  const resume = $("#resume-smart-scan", root);
+  const pauseResume = $("#pause-resume-smart-scan", root);
   const lanes = new Map();
   let last = null;
   let shown = null;
@@ -5102,7 +5431,10 @@ function bindMicrolinkScanBar(root) {
     shown = running || (smartScanBusy(scan) || scan.external_source_runs?.length ? null : last);
     state.microlinkRunControl = shown?.control ?? null;
     state.microlinkVisibleErrors = shown ? shown.result.errors || [] : null;
-    if (!shown) return;
+    if (!shown) {
+      state.microlinkOverview = null;
+      return;
+    }
     const {kind, result, pending, reconnecting} = shown;
     const discovery = kind === "discovery";
     const name = discovery ? "Microlink company search" : "Microlink contacts";
@@ -5110,14 +5442,14 @@ function bindMicrolinkScanBar(root) {
     const progress = discovery
       ? `${formatNumber(result.requests ?? 0)}/${formatNumber(result.max_requests ?? 0)} requests reserved · ${formatNumber(result.candidates ?? 0)} new companies`
       : `${formatNumber(result.completed ?? 0)}/${formatNumber(result.companies ?? 0)} companies processed · ${formatNumber(result.failed ?? 0)} failed · ${formatNumber(result.requests ?? 0)}/${formatNumber(result.max_requests ?? 0)} requests`;
-    status.className = `smart-scan-status status-${reconnecting ? "reconnecting" : phase === "stopping" ? "running" : phase}`;
-    status.innerHTML = `<i></i> ${escapeHtml(humanize(reconnecting ? "reconnecting" : phase))}`;
     $("#smart-scan-run-controls", root).hidden = !active(result) && !result.resumable;
-    $("#pause-smart-scan", root).hidden = true;
-    $("#smart-scan-phase-label", root).textContent = [name, result.mission].filter(Boolean).join(" · ");
+    $("#smart-scan-phase-label", root).textContent = [name, result.mission, reconnecting ? "Reconnecting…" : ""].filter(Boolean).join(" · ");
     const done = discovery ? result.completed_requests : (result.completed || 0) + (result.failed || 0);
     const cap = discovery ? result.max_requests : result.companies;
     const percent = cap ? Math.min(100, Math.round((done || 0) / cap * 100)) : 0;
+    state.microlinkOverview = {label:name, status:phase, run:{
+      ...result, progress_percent:percent, new_companies_added:discovery ? result.candidates : undefined,
+    }};
     $("#smart-scan-percent", root).textContent = `${percent}%`;
     $("#smart-scan-track-fill", root).style.width = `${percent}%`;
     const track = $("#smart-scan-track", root);
@@ -5143,13 +5475,10 @@ function bindMicrolinkScanBar(root) {
     copy.disabled = !errors.length;
     const terminal = $("#smart-terminal-lines", root);
     const follow = smartScanTerminalNearBottom(terminal);
-    const content = events.map(smartScanTerminalLine).join("") ||
-      '<div class="smart-terminal-empty">No failures recorded.</div>';
-    if (terminal.dataset.microlinkContent !== content) {
-      terminal.innerHTML = content;
-      terminal.dataset.microlinkContent = content;
-    }
-    if (follow) terminal.scrollTop = terminal.scrollHeight;
+    const rows = events.map(smartScanTerminalLine);
+    if (!rows.length) rows.push('<div class="smart-terminal-empty">No failures recorded.</div>');
+    renderTerminalRows(terminal, rows, {follow:follow && !errorTab});
+    highlightLatestTerminalActivity(terminal, !errorTab && active(result));
     $("#smart-terminal-meta", root).textContent = errorTab
       ? `${formatNumber(errors.length)} / ${formatNumber(failures)} failures`
       : "";
@@ -5158,8 +5487,12 @@ function bindMicrolinkScanBar(root) {
     root.dataset.status = phase;
     stop.hidden = !active(result) || phase === "stopping";
     stop.disabled = pending || result.status === "stopping";
-    resume.hidden = active(result) || !result.resumable;
-    resume.disabled = pending;
+    pauseResume.value = "resume";
+    pauseResume.textContent = "Resume";
+    pauseResume.hidden = active(result) || !result.resumable;
+    pauseResume.disabled = pending;
+    renderAggregateScanState();
+    return true;
   }
 
   function monitor(kind) {
@@ -5215,7 +5548,7 @@ function bindMicrolinkScanBar(root) {
         const result = await api(`${endpoint}/${action}`, {method: "POST"});
         accept(action === "stop" && result.status === "stopping" ? {...lane.result, ...result} : result);
       } catch (error) {
-        showToast(error.message);
+        showToast(error.message, "error");
       } finally {
         lane.pending = false;
         render();
@@ -5235,11 +5568,14 @@ function bindMicrolinkScanBar(root) {
     };
   }
 
-  root.addEventListener("microlink-render", render);
+  root.addEventListener("microlink-render", event => {
+    if (render()) event.preventDefault();
+  });
   return monitor;
 }
 
 function bindScanCardHelp(dialog) {
+  addScanFieldHelp(dialog);
   const body = $(".scan-setup-body", dialog);
   let trigger;
   let tooltip;
@@ -5248,7 +5584,7 @@ function bindScanCardHelp(dialog) {
 
   function hide() {
     clearTimeout(hideTimer);
-    tooltip?.hidePopover();
+    if (tooltip?.matches(":popover-open")) tooltip.hidePopover();
     trigger = tooltip = null;
     pinned = false;
     window.removeEventListener("resize", position);
@@ -5290,33 +5626,31 @@ function bindScanCardHelp(dialog) {
     if (!pinned) hideTimer = setTimeout(hide, 180);
   }
 
-  for (const button of dialog.querySelectorAll(".scan-card-info")) {
-    const tip = button.nextElementSibling;
-    button.addEventListener("pointerenter", event => {
-      if (event.pointerType === "mouse" && !pinned) show(button);
-    });
-    button.addEventListener("pointerleave", () => {
-      if (trigger === button && !button.matches(":focus-visible")) deferHide();
-    });
-    button.addEventListener("focus", () => {
-      if (button.matches(":focus-visible")) show(button);
-    });
-    button.addEventListener("blur", () => {
-      if (trigger === button) hide();
-    });
-    button.addEventListener("click", () => {
-      if (trigger === button && pinned) {
-        hide();
-      } else {
-        show(button);
-        pinned = Boolean(tooltip);
-      }
-    });
-    tip.addEventListener("pointerenter", () => clearTimeout(hideTimer));
-    tip.addEventListener("pointerleave", () => {
-      if (!button.matches(":focus-visible")) deferHide();
-    });
-  }
+  dialog.addEventListener("pointerover", event => {
+    const button = event.target.closest(".scan-card-info");
+    if (tooltip?.contains(event.target)) clearTimeout(hideTimer);
+    if (button && event.pointerType === "mouse" && !pinned) show(button);
+  });
+  dialog.addEventListener("pointerout", event => {
+    const button = event.target.closest(".scan-card-info");
+    if ((button && button === trigger || tooltip?.contains(event.target))
+      && !trigger?.matches(":focus-visible")) deferHide();
+  });
+  dialog.addEventListener("focusin", event => {
+    if (event.target.matches(".scan-card-info:focus-visible")) show(event.target);
+  });
+  dialog.addEventListener("focusout", event => {
+    if (event.target === trigger) hide();
+  });
+  dialog.addEventListener("click", event => {
+    const button = event.target.closest(".scan-card-info");
+    if (!button) return;
+    if (trigger === button && pinned) hide();
+    else {
+      show(button);
+      pinned = Boolean(tooltip);
+    }
+  });
 
   body.addEventListener("scroll", position);
   dialog.addEventListener("pointerdown", event => {
@@ -5330,16 +5664,276 @@ function bindScanCardHelp(dialog) {
   dialog.addEventListener("close", hide);
 }
 
+const SAVED_SCAN_GOALS_KEY = "beings.scan.saved-goals.v1";
+function readSavedScanGoals() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SAVED_SCAN_GOALS_KEY) || "[]");
+    return Array.isArray(saved) ? saved.filter(item => typeof item?.goal === "string"
+      && item.goal.trim() && item.settings && typeof item.settings === "object") : [];
+  } catch { return []; }
+}
+
+function selectedScanMission() {
+  try { return localStorage.getItem("beings-mission") || "beings"; }
+  catch { return "beings"; }
+}
+async function seedMissionScanTerms(dialog) {
+  const mission = selectedScanMission();
+  const context = await api(`/api/scans/mission-context?mission_id=${encodeURIComponent(mission)}`);
+  if (!dialog.open || selectedScanMission() !== mission) return;
+  state.scanMissionContext = context;
+  const terms = (context.search_terms || []).filter(term => typeof term === "string");
+  const fields = [
+    [$("#smart-scan-discovery-terms", dialog), terms.slice(0, 5).join("\n")],
+    [$("[name=meta_queries]", dialog), terms.slice(0, 20).join("\n")],
+  ];
+  for (const [field, value] of fields) {
+    if (!field) continue;
+    const previous = field.value;
+    const untouched = !field.value.trim() || field.value === field.dataset.missionSeed
+      || (field.name === "meta_queries" && field.value === DEFAULT_META_DISCOVERY_QUERIES.join("\n"));
+    if (!untouched) continue;
+    if (value || field.dataset.missionSeed) field.value = value;
+    field.dataset.missionSeed = value;
+    if (field.name === "meta_queries" && field.value !== previous && state.discoveryTab === "paid_ads") {
+      scanEstimateRefresh.get(field.form)?.();
+    }
+    if (field.id === "smart-scan-discovery-terms") state.smartScanSearchTermsDraft = field.value;
+  }
+}
+
+function bindScanGoal(dialog) {
+  const form = $("#scan-goal-form", dialog);
+  const status = $("#scan-goal-status", form);
+  const goalInput = form.elements.goal;
+  const send = $('button[type="submit"]', form);
+  const configuringLabel = $("[data-configuring-label]", send);
+  const sendLabel = send.getAttribute("aria-label");
+  let revision = 0;
+  function showStatus(text, configured = false) {
+    status.textContent = text;
+    status.classList.toggle("scan-goal-confirmation", configured);
+  }
+  function applySettings(settings, presetKey) {
+      const fields = {
+        due_hydration_enabled:"smartScanDueHydrationEnabled",
+        due_company_limit:"smartScanDueCompanyLimit",
+        source_ai_enabled:"smartScanSourceAIEnabled", microlink_enabled:"smartScanMicrolinkEnabled",
+        ai_enabled:"smartScanAIEnabled", ai_site_limit:"smartScanAISiteLimit",
+        seo_enabled:"smartScanSEOEnabled", seo_site_limit:"smartScanSEOSiteLimit",
+        people_hydration_enabled:"smartScanPeopleEnabled", people_company_limit:"smartScanPeopleCompanyLimit",
+        paid_ads_enabled:"smartScanAdsEnabled", paid_ads_company_limit:"smartScanAdsCompanyLimit",
+        paid_ads_max_usd:"smartScanAdsMaxUSD", microlink_hydration:"smartScanMicrolinkHydration",
+      };
+      for (const field of Object.keys(fields)) {
+        if (!Object.hasOwn(settings || {}, field)) throw new Error("AI configuration was incomplete.");
+      }
+      const terms = settings.search_terms;
+      if (!Array.isArray(terms) || terms.length > 5
+        || terms.some(term => typeof term !== "string" || !term.trim() || term.length > 100 || /[\r\n]/.test(term))) {
+        throw new Error("AI configuration did not include valid search terms. Please try again after the server update.");
+      }
+      state.smartScanSearchTermsDraft = [...new Set(terms.map(term => term.trim()))].join("\n");
+      $("#smart-scan-discovery-terms", dialog).value = state.smartScanSearchTermsDraft;
+      for (const [field, key] of Object.entries(fields)) state[key] = settings[field];
+      state.smartScanPreset = presetKey;
+      renderPresets();
+      // Show the configured scan draft.
+      dialog.dispatchEvent(new Event("scan-goal-applied"));
+      for (const panel of dialog.querySelectorAll("[data-scan-setup-panel]")) {
+        panel.hidden = false;
+      }
+      $("#smart-scan-options-title", dialog).textContent = "Smart Scan";
+      $("#smart-scan-options-subtitle", dialog).textContent = "";
+      $("#scan-setup-start", dialog).hidden = true;
+      $("#start-smart-scan", dialog).hidden = false;
+      updateSmartScanLaunchControls();
+      $(".scan-option-panel[data-scan-setup-panel='smart']", dialog)?.scrollIntoView({behavior:"smooth", block:"start"});
+  }
+  function renderPresets() {
+    $("#scan-basic-option", dialog).setAttribute("aria-pressed", String(state.smartScanPreset === "basic"));
+    const list = $("#saved-scan-goals", dialog);
+    list.innerHTML = readSavedScanGoals().map((preset, index) => `<div class="saved-scan-goal-row"><button type="button" class="button saved-scan-goal" aria-pressed="${state.smartScanPreset === `${preset.mission_id || selectedScanMission()}:${preset.goal}`}" data-saved-scan-goal="${index}" title="${escapeHtml(preset.goal)}"><span class="scan-basic-dot" aria-hidden="true"></span><span>${escapeHtml(preset.goal)}</span></button><button type="button" class="saved-scan-goal-delete" data-delete-scan-goal="${index}" aria-label="Delete saved scan: ${escapeHtml(preset.goal)}" title="Delete saved scan">×</button></div>`).join("");
+  }
+  renderPresets();
+  $("#scan-basic-option", dialog).addEventListener("click", () => {
+    if (state.smartScanGoalPending || scanLaunchConflict("smart")) return;
+    state.smartScanFailureSkipEnabled = false;
+    state.smartScanFailureRate = 75;
+    applySettings({
+      due_hydration_enabled:true, due_company_limit:null, search_terms:[],
+      source_ai_enabled:false, microlink_enabled:false,
+      ai_enabled:false, ai_site_limit:100, seo_enabled:false, seo_site_limit:100,
+      people_hydration_enabled:false, people_company_limit:100,
+      paid_ads_enabled:false, paid_ads_company_limit:100, paid_ads_max_usd:5,
+      microlink_hydration:{company_limit:100, request_limit:500},
+    }, "basic");
+    form.elements.goal.value = "";
+    showStatus("");
+    revision++;
+    void seedMissionScanTerms(dialog).catch(error => { showStatus(error.message); });
+  });
+  $("#saved-scan-goals", dialog).addEventListener("click", event => {
+    const remove = event.target.closest("[data-delete-scan-goal]");
+    const select = event.target.closest("[data-saved-scan-goal]");
+    if (!remove && !select) return;
+    if (state.smartScanGoalPending || scanLaunchConflict("smart")) return;
+    const presets = readSavedScanGoals();
+    try {
+      if (remove) {
+        const index = Number(remove.dataset.deleteScanGoal);
+        presets.splice(index, 1);
+        localStorage.setItem(SAVED_SCAN_GOALS_KEY, JSON.stringify(presets));
+        renderPresets();
+        form.elements.goal.focus({preventScroll:true});
+      } else {
+        const preset = presets[Number(select.dataset.savedScanGoal)];
+        if (!preset) return;
+        if (preset.mission_id && preset.mission_id !== selectedScanMission()) {
+          throw new Error("Switch to the mission this scan was saved for to reuse its settings.");
+        }
+        applySettings(structuredClone(preset.settings), `${preset.mission_id || selectedScanMission()}:${preset.goal}`);
+        form.elements.goal.value = preset.goal;
+        revision++;
+        showStatus("Saved settings applied.");
+      }
+    } catch (error) { showStatus(error.message); }
+  });
+  dialog.addEventListener("input", event => {
+    if (event.target !== goalInput && !event.target.closest(".scan-option-panel[data-scan-setup-panel='smart']")) return;
+    revision++;
+    if (!state.smartScanGoalPending) showStatus("");
+  });
+  dialog.addEventListener("close", () => { revision++; });
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (state.smartScanGoalPending || smartScanLaunchBlocked() || !form.reportValidity()) return;
+    const goal = form.elements.goal.value.trim();
+    const requestedRevision = revision;
+    const mission = selectedScanMission();
+    state.smartScanGoalPending = true;
+    goalInput.readOnly = true;
+    configuringLabel.hidden = false;
+    send.setAttribute("aria-label", "Configuring…");
+    showStatus("");
+    updateSmartScanLaunchControls();
+    try {
+      const result = await api("/api/smart-scan/configure", {
+        method:"POST", body:JSON.stringify({goal, mission_id:mission, confirmed_maximum_microusd:20000}),
+      });
+      if (!dialog.open || selectedScanMission() !== mission) return;
+      if (revision !== requestedRevision || goalInput.value.trim() !== goal) {
+        showStatus("The scan settings changed during configuration.");
+        return;
+      }
+      const conflict = scanLaunchConflict("smart");
+      if (conflict) {
+        showStatus(conflict);
+        return;
+      }
+      applySettings(result.settings, `${mission}:${goal}`);
+      const presets = readSavedScanGoals();
+      const preset = {goal, mission_id:mission, settings:result.settings};
+      const existing = presets.findIndex(item => item.goal === goal
+        && item.mission_id === mission);
+      if (existing >= 0) presets[existing] = preset;
+      else presets.push(preset);
+      localStorage.setItem(SAVED_SCAN_GOALS_KEY, JSON.stringify(presets));
+      renderPresets();
+      showStatus("The scan settings below have been configured for your goal.", true);
+    } catch (error) {
+      showStatus(error.message);
+    } finally {
+      state.smartScanGoalPending = false;
+      goalInput.readOnly = false;
+      configuringLabel.hidden = true;
+      send.setAttribute("aria-label", sendLabel);
+      updateSmartScanLaunchControls();
+    }
+  });
+}
+
 function bindScanSetup(root, monitor) {
   const dialog = $("#smart-scan-options-dialog", root);
   bindScanCardHelp(dialog);
+  bindScanCardHelp($("#import-companies-dialog"));
+  bindScanGoal(dialog);
+  const methods = $("#scan-methods-disclosure", dialog);
+  const basicPanel = $(".scan-option-panel[data-scan-setup-panel='smart']", dialog);
+  methods.before(basicPanel);
+  for (const group of basicPanel.querySelectorAll(":scope > .scan-option-group")) {
+    const rows = $(":scope > .scan-option-rows", group);
+    if (!rows || !$(".scan-card-title", rows)) continue;
+    $(":scope > h3", group)?.remove();
+    group.removeAttribute("aria-labelledby");
+    rows.className = "scan-research-panels";
+    for (const row of rows.children) {
+      const title = $(".scan-card-title", row);
+      if (!title) continue;
+      row.classList.add("panel", "scan-research-panel");
+      const head = document.createElement("div");
+      head.className = "panel-head";
+      const heading = document.createElement("h3");
+      const label = $("label", title);
+      const names = {
+        "smart-scan-due-hydration":"Find & refresh companies",
+        "smart-scan-skip-failures":"Repeat-failure filtering",
+        "smart-scan-use-people":"Contact lookup",
+      };
+      if (label) {
+        const name = names[$("input", label)?.id];
+        if (name) $("span", label).textContent = name;
+        heading.append(label);
+      } else {
+        const caption = $(":scope > span", title);
+        if (caption) heading.append(caption);
+        else {
+          heading.textContent = title.textContent.trim();
+          title.textContent = "";
+        }
+      }
+      head.append(heading, ...title.childNodes);
+      title.remove();
+      const body = document.createElement("div");
+      body.className = "scan-research-body";
+      body.append(...row.childNodes);
+      row.append(head, body);
+    }
+  }
+  function showScanModes() {
+    if (dialog.dataset.scanMode === "smart") {
+      $("#smart-scan-options-title", dialog).textContent = "Smart Scan";
+      $("#smart-scan-options-subtitle", dialog).textContent = "";
+    }
+    if ($("#web-scan-form")) return;
+    scanMethodsShell();
+    void Promise.all([loadDiscoveryMethods(), loadIntelligence(), loadAdDiscoveryOverview()]);
+  }
   const discoveryForm = $("#microlink-discovery-form", dialog);
   const contactsForm = $("#microlink-contacts-form", dialog);
-  const estimateButton = $("#scan-setup-estimate", dialog);
+  const laneDialogs = {};
+  for (const [kind, title, form] of [
+    ["discovery", "Find companies", discoveryForm],
+    ["contacts", "Find contacts", contactsForm],
+  ]) {
+    const modal = document.createElement("dialog");
+    modal.id = kind === "discovery" ? "find-companies-dialog" : "find-contacts-dialog";
+    modal.className = "modal smart-scan-options-dialog standalone-scan-dialog";
+    modal.dataset.scanMode = kind;
+    modal.setAttribute("aria-labelledby", `${modal.id}-title`);
+    modal.innerHTML = `<header class="modal-head"><div><h2 id="${modal.id}-title" tabindex="-1" autofocus>${title}</h2></div><button type="button" class="icon-button" data-close-dialog="${modal.id}" aria-label="Close ${title.toLowerCase()}">×</button></header><div class="modal-body scan-setup-body"></div><footer class="modal-actions scan-setup-footer"><div class="scan-setup-actions"><button class="button" type="button" data-close-dialog="${modal.id}">Close</button></div></footer>`;
+    $(".scan-setup-body", modal).append(form);
+    form.hidden = false;
+    root.append(modal);
+    laneDialogs[kind] = modal;
+    bindScanCardHelp(modal);
+  }
+  let activeDialog = dialog;
   const startButton = $("#scan-setup-start", dialog);
   const smartButton = $("#start-smart-scan", dialog);
   const status = $("#scan-setup-estimate-text", dialog);
-  const triggers = root.querySelectorAll("[data-scan-setup]");
+  const laneLockNote = $("#scan-setup-lane-lock", dialog);
+  const triggers = root.querySelectorAll("[data-scan-setup], #scan-methods-trigger");
   const descriptions = {
     smart: "Find new companies and refresh saved profiles.",
     discovery: "Search the web with Microlink using your selected mission or a preset. New matches are added to Companies.",
@@ -5391,14 +5985,13 @@ function bindScanSetup(root, monitor) {
   function update() {
     const lane = lanes[mode];
     const locked = blocked();
-    const lockNote = $("#scan-setup-lane-lock", dialog);
+    const lockNote = laneLockNote;
     lockNote.hidden = !lane || !locked;
     lockNote.textContent = state.smartScan?.profile?.microlink_configured === false
       ? "Connect Microlink in Settings to use this scan."
       : scanLaunchConflict("microlink") || "Scan request in progress.";
     if (lane) {
       for (const control of lane.form.elements) control.disabled = locked;
-      estimateButton.disabled = locked;
       startButton.disabled = locked || !approval;
     }
   }
@@ -5412,18 +6005,28 @@ function bindScanSetup(root, monitor) {
     update();
   }
   function select(trigger) {
-    mode = trigger.dataset.scanSetup;
-    dialog.dataset.scanMode = mode;
-    $("#smart-scan-options-title", dialog).textContent = mode === "smart"
-      ? "Smart Scan" : trigger.textContent.trim();
+    mode = trigger.dataset.scanSetup || "smart";
+    activeDialog = laneDialogs[mode] || dialog;
+    const actions = $(".scan-setup-actions", activeDialog);
+    actions.append(startButton);
+    $(".scan-setup-footer", activeDialog).prepend(status);
+    $(".scan-setup-body", activeDialog).prepend(laneLockNote);
+    dialog.dataset.scanMode = "smart";
+    syncScanGoalHelper(dialog, mode);
+    $("#smart-scan-options-title", dialog).textContent = "Smart Scan";
     $("#smart-scan-options-subtitle", dialog).textContent = descriptions[mode];
-    for (const panel of panels) panel.hidden = panel.dataset.scanSetupPanel !== mode;
+    for (const panel of panels) panel.hidden = false;
+    methods.open = true;
+    showScanModes();
     const lane = lanes[mode];
-    smartButton.hidden = Boolean(lane);
-    estimateButton.hidden = startButton.hidden = !lane;
+    smartButton.hidden = false;
+    startButton.hidden = !lane;
     startButton.textContent = lane?.startLabel || "";
     reset();
   }
+  dialog.addEventListener("scan-goal-applied", () => {
+    select($("#scan-launch-trigger", root));
+  });
   async function perform(work) {
     pending = true;
     update();
@@ -5436,24 +6039,20 @@ function bindScanSetup(root, monitor) {
     trigger.addEventListener("click", () => {
       if (trigger.hidden || trigger.disabled || pending || dialog.open) return;
       select(trigger);
-      dialog.showModal();
-      $(".scan-setup-body", dialog).scrollTop = 0;
+      activeDialog.showModal();
+      if (mode === "smart") {
+        refreshSelectedScanEstimate();
+        void seedMissionScanTerms(dialog).catch(error => { $("#scan-goal-status", dialog).textContent = error.message; });
+      } else scanEstimateRefresh.get(lanes[mode].form)?.();
+      $(".scan-setup-body", activeDialog).scrollTop = 0;
       root.dispatchEvent(new Event("microlink-refresh"));
     });
   }
   $("#retry-scan-inventory", root).addEventListener("click", () => void loadSmartScan());
-  for (const lane of Object.values(lanes)) {
-    lane.form.addEventListener("submit", event => {
-      event.preventDefault();
-      estimateButton.click();
-    });
-  }
-  contactsForm.addEventListener("input", reset);
   discoveryForm.addEventListener("input", event => {
     const {name, checked} = event.target;
     if (checked && name === "limit_to_ai") discoveryForm.elements.limit_to_com.checked = false;
     if (checked && name === "limit_to_com") discoveryForm.elements.limit_to_ai.checked = false;
-    reset();
   });
   discoveryForm.elements.lane.addEventListener("change", () => {
     const wasMission = scope === "mission";
@@ -5468,28 +6067,28 @@ function bindScanSetup(root, monitor) {
     }
     reset();
   });
-  estimateButton.addEventListener("click", () => {
-    const lane = lanes[mode];
-    if (!lane || blocked() || !lane.form.reportValidity()) return;
-    const options = optionsFor(lane);
-    reset();
-    void perform(async () => {
-      message("Preparing estimate…");
-      const quote = await api(`${lane.monitor.endpoint}/estimate`, {
-        method: "POST", body: JSON.stringify(options),
-      });
+  for (const lane of Object.values(lanes)) {
+    bindAutomaticScanEstimate(lane.form, async event => {
+      if (blocked()) return;
+      const quote = await requestScanEstimate(event, `${lane.monitor.endpoint}/estimate`, () => optionsFor(lane));
+      if (!quote || blocked()) return;
       if (quote.configured && quote.max_requests) {
-        approval = {options, estimate_id: quote.estimate_id, confirmed_max_requests: quote.max_requests};
+        approval = {options:optionsFor(lane), estimate_id:quote.estimate_id, confirmed_max_requests:quote.max_requests};
       }
+      startButton.textContent = approval
+        ? `${lane.startLabel} · up to ${formatNumber(quote.max_requests)} requests` : lane.startLabel;
       message(quote.configured ? lane.summary(quote) : "Configure Microlink in Settings.");
+      update();
+    }, () => {
+      reset();
+      startButton.textContent = lane.startLabel;
     });
-  });
+  }
   startButton.addEventListener("click", () => {
     const lane = lanes[mode];
     if (!lane || !approval || blocked() || !lane.form.reportValidity()) return;
     if (JSON.stringify(optionsFor(lane)) !== JSON.stringify(approval.options)) {
-      reset();
-      message("Options changed. Get a new estimate.");
+      scanEstimateRefresh.get(lane.form)?.();
       return;
     }
     const {options, ...confirmation} = approval;
@@ -5503,7 +6102,7 @@ function bindScanSetup(root, monitor) {
           method: "POST", body: JSON.stringify({...options, ...confirmation}),
         });
         message();
-        lane.monitor.started(result, dialog);
+        lane.monitor.started(result, activeDialog);
       } finally {
         state.microlinkScanStarting = false;
         updateSmartScanLaunchControls();
@@ -5515,6 +6114,14 @@ function bindScanSetup(root, monitor) {
 }
 
 function bindScanLauncher() {
+  const directoriesTrigger = $("#find-directories-trigger");
+  directoriesTrigger.disabled = false;
+  directoriesTrigger.addEventListener("click", () => {
+    if (!$("#web-scan-form")) scanMethodsShell();
+    const dialog = $("#find-directories-dialog");
+    if (!dialog.open) dialog.showModal();
+    void Promise.all([loadDiscoveryMethods(), loadIntelligence()]);
+  });
   const trigger = $("#import-companies-trigger");
   trigger.addEventListener("click", () => {
     if (trigger.disabled || state.importScanStarting) return;
@@ -5529,8 +6136,9 @@ function bindScanLauncher() {
 function smartScanViewShell() {
   $("#view-smart_scan").innerHTML = `
     <div id="scan-smart-mode">${smartScanShellMarkup()}</div>
-    <form class="panel" id="import-scan-form" hidden>
-      <div class="panel-head"><h3>Import</h3><span class="badge moss">Public retrieval $0</span></div>
+    <dialog class="modal smart-scan-options-dialog standalone-scan-dialog" id="import-companies-dialog" data-scan-mode="import" aria-labelledby="import-companies-title">
+      <header class="modal-head"><h2 id="import-companies-title" tabindex="-1" autofocus>Import companies</h2><button type="button" class="icon-button" data-close-dialog="import-companies-dialog" aria-label="Close import companies">×</button></header>
+    <form id="import-scan-form" class="modal-body scan-setup-body">
       <div class="paid-form-body">
         <label class="field"><span>Company URLs · up to 10,000 per import</span>
           <textarea name="urls" rows="12" required spellcheck="false" autocapitalize="off"
@@ -5542,7 +6150,7 @@ function smartScanViewShell() {
         <div id="import-scan-progress" role="status" aria-live="polite"></div>
       </div>
       <footer class="paid-form-actions"><button class="button" type="button" id="cancel-import-scan">Cancel</button><button class="button primary" type="submit" id="start-import-scan">Import and scan · $0</button></footer>
-    </form>`;
+    </form></dialog>`;
   installScanPaneDivider($("#smart-scan-shell"));
   $("#cancel-import-scan").addEventListener("click", () => setScanImportMode(false));
   $("#import-scan-form").addEventListener("submit", startImportScan);
@@ -5618,6 +6226,7 @@ function webScanConfig() {
   const form = $("#web-scan-form");
   if (!form) return null;
   return {
+    mission_id:selectedScanMission(),
     max_hosts_per_source: Number(form.elements.max_hosts_per_source.value),
     max_network_inspections: Number(form.elements.max_network_inspections.value),
     free_intelligence: form.elements.free_intelligence?.checked !== false,
@@ -5636,25 +6245,11 @@ function invalidateWebScanEstimate() {
 async function estimateWebScan(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  const button = $("#estimate-web-scan");
-  if (scanActionBlocked(button) || state.webScanStarting || !form.reportValidity()) return;
-  const request = webScanConfig();
-  state.webScanEstimate = null;
+  if (state.webScanStarting || scanControlLocks.has(form) || !form.checkValidity()) return;
+  const estimate = await requestScanEstimate(event, "/api/web-scan/estimates", webScanConfig);
+  if (!estimate) return;
+  state.webScanEstimate = {...estimate, draft:JSON.stringify(webScanConfig())};
   renderWebScanEstimate();
-  setScanControlsLocked(form, true);
-  button.textContent = "Estimating…";
-  try {
-    const estimate = await api("/api/web-scan/estimates", { method: "POST", body: JSON.stringify(request) });
-    if (JSON.stringify(webScanConfig()) !== JSON.stringify(request)) throw new Error("Scan settings changed; estimate again");
-    state.webScanEstimate = estimate;
-    renderWebScanEstimate();
-  } catch (error) {
-    showToast(error.message);
-  } finally {
-    setScanControlsLocked(form, false);
-    button.textContent = "Estimate";
-    syncGoButton();
-  }
 }
 
 function renderWebScanEstimate() {
@@ -5670,7 +6265,7 @@ function renderWebScanEstimate() {
   root.innerHTML = `
     <div class="panel-head"><h3>Maximum work</h3><span class="badge moss">${estimate.provider_cost_usd == null ? "Usage caps" : maximumCostMoney(estimate.provider_cost_usd) + " max"}</span></div>
     <div class="web-scan-estimate">
-      <div class="web-scan-stats">
+      <details><summary>Work limits</summary><div class="web-scan-stats">
         <span><small>Enabled sources</small><strong>${formatNumber(estimate.enabled_source_count)}</strong></span>
         <span><small>Candidate pool</small><strong>${formatNumber(estimate.candidate_capacity)}</strong></span>
         <span><small>Websites</small><strong>${formatNumber(estimate.max_network_inspections)}</strong></span>
@@ -5680,6 +6275,7 @@ function renderWebScanEstimate() {
       </div>
       <div class="web-scan-fixed"><span>English only</span><span>No OpenAI</span><span>No Apify</span><span>90-day people lookup hold</span></div>
       ${estimate.has_unpriced_provider_usage ? `<small>Microlink usage is unpriced here; known people maximum ${maximumCostMoney(estimate.known_provider_cost_usd)}.</small>` : ""}
+      </details>
       <button class="button primary web-scan-run" id="run-web-scan" type="button">${estimate.provider_cost_usd == null ? "Scan web · usage caps" : "Scan web · " + scanCapLabel(estimate) + " max"}</button>
     </div>`;
   $("#run-web-scan").addEventListener("click", runWebScan);
@@ -5690,6 +6286,10 @@ async function runWebScan() {
   if (!state.webScanEstimate || scanActionBlocked($("#run-web-scan")) || state.webScanStarting || ACTIVE_RUN_STATES.has(state.scanStatus)) return;
   const form = $("#web-scan-form");
   if (scanControlLocks.has(form)) return;
+  if (state.webScanEstimate.draft !== JSON.stringify(webScanConfig())) {
+    scanEstimateRefresh.get(form)?.();
+    return;
+  }
   state.webScanStarting = true;
   setScanControlsLocked(form, true);
   syncGoButton();
@@ -5703,7 +6303,7 @@ async function runWebScan() {
     showToast("Web scan started");
     pollScanStatus();
   } catch (error) {
-    showToast(error.message);
+    showToast(error.message, "error");
   } finally {
     state.webScanStarting = false;
     setScanControlsLocked(form, false);
@@ -5767,7 +6367,8 @@ function discoveryRunForTab(tab) {
 }
 
 function discoveryRunnableSources(tab) {
-  return (tab.sources || []).filter(source => (!source.status || source.status === "accepted") && source.scan_eligible !== false);
+  return (tab.sources || []).filter(source => (source.id ?? source.suggestion_id) != null
+    && (!source.status || source.status === "accepted") && source.scan_eligible !== false);
 }
 
 function discoverySourceChoices(tab) {
@@ -5778,12 +6379,33 @@ function discoverySourceChoices(tab) {
   }).join("");
 }
 
-function discoveryScannerChoices(tab) {
+function availableDiscoveryScanners(tab) {
   const activeScannerIds = new Set(activeDiscoveryRunsForTab(tab).flatMap(run => run.scanner_ids || run.request?.scanner_ids || []));
-  return tab.scanners.map(scanner => {
-    const running = activeScannerIds.has(scanner.id);
-    return `<label class="discovery-source-choice"><input type="checkbox" name="scanner_ids" value="${escapeHtml(scanner.id)}" ${running ? "disabled" : ""} /><span><strong>${escapeHtml(humanize(String(scanner.id || "").replace(/_v\d+$/, "")))}</strong><small>${escapeHtml(scanner.safe_claim || "Bounded public company intelligence")}</small></span><b>${escapeHtml(running ? "Scanning" : humanize(scanner.cost_class || "public"))}</b></label>`;
+  return tab.scanners.filter(scanner => scanner.id && !activeScannerIds.has(scanner.id));
+}
+
+function discoveryScannerChoices(scanners) {
+  return scanners.map(scanner => {
+    return `<label class="discovery-source-choice"><input type="checkbox" name="scanner_ids" value="${escapeHtml(scanner.id)}" /><span><strong>${escapeHtml(humanize(String(scanner.id || "").replace(/_v\d+$/, "")))}</strong></span><b>${escapeHtml(humanize(scanner.cost_class || "public"))}</b></label>`;
   }).join("");
+}
+
+function syncDiscoveryProviderChoices(scan = state.smartScan || {}) {
+  const profile = scan.profile || {};
+  const configured = {
+    people_hydration_enabled: scan.inventory?.people_hydration_configured ?? profile.people_hydration_configured,
+    microlink_enabled: profile.microlink_configured,
+  };
+  for (const form of $$("#web-scan-form, [data-discovery-method-form]")) {
+    if (scanControlLocks.has(form)) continue;
+    for (const [name, available] of Object.entries(configured)) {
+      const input = form.elements[name];
+      if (!input) continue;
+      input.disabled = available === false;
+      if (input.disabled) input.checked = false;
+      input.labels[0].hidden = input.disabled;
+    }
+  }
 }
 
 function discoveryPaidChoices() {
@@ -5800,30 +6422,25 @@ function discoveryMethodPanelMarkup(tab) {
   }
   if (!state.discoveryMethods) return `<section class="panel discovery-method-loading"><p class="empty">${loadingIndicator(`Loading ${tab.label.toLowerCase()}…`)}</p></section>`;
   const ready = discoveryTabReady(tab);
-  const latest = discoveryMethodRuns(tab)[0];
   if (tab.id === "company_intelligence") {
-    const scanners = tab.scanners || [];
-    const availableScanners = scanners.filter(scanner => !activeDiscoveryRunsForTab(tab).some(run => (run.scanner_ids || run.request?.scanner_ids || []).includes(scanner.id)));
+    const scanners = availableDiscoveryScanners(tab);
     return `<div class="discovery-method-layout">
       <form class="panel discovery-method-form" data-discovery-method-form="${tab.id}" data-api-method="${escapeHtml(tab.api_id)}">
         ${discoveryMethodHeader(tab, `<span class="badge moss">90-day reuse</span>`)}
         <div class="discovery-method-body">
-          <fieldset class="discovery-source-fieldset"><legend>Company scanners · ${formatNumber(scanners.length)}</legend><div class="discovery-source-list">${scanners.length ? discoveryScannerChoices(tab) : `<div class="discovery-source-empty"><strong>No scanners registered</strong><span>The server scanner catalogue is empty.</span></div>`}</div></fieldset>
+          <fieldset class="discovery-source-fieldset"><legend>Company scanners · ${formatNumber(scanners.length)} ${scanCardHelp("company-scanners", "Company scanners", "Choose which research checks to run on existing companies.")}</legend><div class="discovery-source-list">${discoveryScannerChoices(scanners)}</div></fieldset>
           <div class="discovery-limit-grid">
             <label class="field"><span>Current company cap</span><input name="max_candidates" type="number" min="1" max="500" value="100" required /></label>
-            <label class="field"><span>Website inspections</span><input name="max_network_inspections" type="number" min="1" max="500" value="100" required /></label>
+            <label class="field"><span>Max website inspections</span><input name="max_network_inspections" type="number" min="1" max="500" value="100" required /></label>
           </div>
           ${discoveryGenericHiddenFields()}${discoveryPaidChoices()}
         </div>
-        <footer class="paid-form-actions"><button class="button primary" type="submit" ${ready && availableScanners.length ? "" : "disabled"}>Estimate scan</button>${availableScanners.length ? "" : "<span>All company scanners are scanning.</span>"}</footer>
       </form>
-      <aside class="discovery-method-side"><section class="panel discovery-method-estimate" id="discovery-estimate-${tab.id}" aria-live="polite" hidden></section><section class="discovery-inline-run" id="discovery-run-${tab.id}" aria-live="polite">${discoveryRunsMarkup(tab)}</section></aside>
+      <aside class="discovery-method-side"><section class="panel discovery-method-estimate" id="discovery-estimate-${tab.id}" aria-live="polite" hidden></section></aside>
     </div>`;
   }
-  const acceptedSources = tab.sources.filter(source => !source.status || source.status === "accepted");
   const sources = discoveryRunnableSources(tab);
-  const needsSources = tab.id !== "public_graph";
-  const canEstimate = ready && (!needsSources || sources.length > 0);
+  const needsSources = tab.source_kinds.length > 0;
   const requirements = discoveryRequirementLabels(tab);
   const openAI = discoveryCapability("openai");
   const aiRequired = requirements.some(item => String(item).toLowerCase().includes("openai")) || tab.id === "searches";
@@ -5832,32 +6449,29 @@ function discoveryMethodPanelMarkup(tab) {
     <form class="panel discovery-method-form" data-discovery-method-form="${tab.id}" data-api-method="${escapeHtml(tab.api_id)}">
       ${discoveryMethodHeader(tab, `<span class="badge ${ready ? "moss" : "warn"}">${ready ? "Public-web crawl" : "Setup required"}</span>`)}
       <div class="discovery-method-body">
-        ${needsSources ? `<fieldset class="discovery-source-fieldset"><legend>Sources ready · ${formatNumber(sources.length)}</legend><div class="discovery-source-list">${sources.length ? discoverySourceChoices(tab) : acceptedSources.length ? `<div class="discovery-source-empty"><strong>All caught up</strong></div>` : `<div class="discovery-source-empty"><strong>No accepted sources</strong><span>Approve one in Find sources.</span></div>`}</div></fieldset>` : ""}
+        ${needsSources ? `<fieldset class="discovery-source-fieldset"><legend>Sources ready · ${formatNumber(sources.length)} ${scanCardHelp(`sources-${tab.id}`, "Sources ready", "Choose the approved sources this scan should check.")}</legend><div class="discovery-source-list">${discoverySourceChoices(tab)}</div></fieldset>` : ""}
         <div class="discovery-limit-grid">
-          <label class="field"><span>Pages / source</span><input name="max_pages" type="number" min="1" max="50" value="50" required /></label>
-          <label class="field"><span>Candidate cap</span><input name="max_candidates" type="number" min="1" max="500" value="500" required /></label>
-          <label class="field"><span>Website inspections</span><input name="max_network_inspections" type="number" min="1" max="500" value="500" required /></label>
-          <label class="field"><span>AI source web calls</span><input name="max_ai_tool_calls" type="number" min="1" max="10" value="${aiChecked ? "10" : "0"}" ${aiChecked ? "" : "disabled"} required /></label>
-          <label class="field"><span>AI candidate reviews</span><input name="max_ai_reviews" type="number" min="0" max="50" value="${aiChecked ? "50" : "0"}" ${aiChecked ? "" : "disabled"} required /></label>
-          <label class="field"><span>AI web reviews</span><input name="max_ai_web_reviews" type="number" min="0" max="20" value="${aiChecked ? "20" : "0"}" ${aiChecked ? "" : "disabled"} required /></label>
+          <label class="field"><span>Max pages per source</span><input name="max_pages" type="number" min="1" max="50" value="50" required /></label>
+          <label class="field"><span>Max candidates</span><input name="max_candidates" type="number" min="1" max="500" value="500" required /></label>
+          <label class="field"><span>Max website inspections</span><input name="max_network_inspections" type="number" min="1" max="500" value="500" required /></label>
+          <label class="field" ${aiChecked ? "" : "hidden"}><span>AI source web calls</span><input name="max_ai_tool_calls" type="number" min="1" max="10" value="${aiChecked ? "10" : "0"}" ${aiChecked ? "" : "disabled"} required /></label>
+          <label class="field" ${aiChecked ? "" : "hidden"}><span>AI candidate reviews</span><input name="max_ai_reviews" type="number" min="0" max="50" value="${aiChecked ? "50" : "0"}" ${aiChecked ? "" : "disabled"} required /></label>
+          <label class="field" ${aiChecked ? "" : "hidden"}><span>AI web reviews</span><input name="max_ai_web_reviews" type="number" min="0" max="20" value="${aiChecked ? "20" : "0"}" ${aiChecked ? "" : "disabled"} required /></label>
         </div>
         ${discoveryPaidChoices()}
-        <label class="discovery-ai-toggle"><input name="ai_resolution" type="checkbox" ${aiChecked ? "checked" : ""} ${openAI.ready && !aiRequired ? "" : "disabled"} /><span><strong>AI resolution and reviews</strong></span></label>
+        <label class="discovery-ai-toggle" ${openAI.ready && !aiRequired ? "" : "hidden"}><input name="ai_resolution" type="checkbox" ${aiChecked ? "checked" : ""} ${openAI.ready && !aiRequired ? "" : "disabled"} /><span><strong>AI resolution and reviews</strong></span></label>
         ${requirements.length ? `<p class="discovery-requirements">Requires ${requirements.map(item => escapeHtml(humanize(item))).join(" · ")}</p>` : ""}
         ${!ready ? `<p class="paid-run-error">${escapeHtml(tab.reason || tab.message || "This method is not ready. Review Settings for the missing capability.")}</p>` : ""}
       </div>
-      <footer class="paid-form-actions"><button class="button primary" type="submit" ${canEstimate ? "" : "disabled"}>Estimate scan</button></footer>
     </form>
     <aside class="discovery-method-side">
       <section class="panel discovery-method-estimate" id="discovery-estimate-${tab.id}" aria-live="polite" hidden></section>
-      <section class="discovery-inline-run" id="discovery-run-${tab.id}" aria-live="polite">${latest ? discoveryRunMarkup(latest, { compact: true }) : ""}</section>
     </aside>
   </div>`;
 }
 
 function bindDiscoveryMethodForms() {
   $$('[data-discovery-method-form]').forEach(form => {
-    form.addEventListener("submit", estimateDiscoveryMethod);
     const invalidate = event => {
       const tabId = form.dataset.discoveryMethodForm;
       if (state.discoveryEstimates[tabId]) {
@@ -5874,12 +6488,17 @@ function bindDiscoveryMethodForms() {
       aiLimits.forEach(([input, defaultValue]) => {
         if (!input) return;
         input.disabled = !aiEnabled;
+        if (input.labels?.[0]) input.labels[0].hidden = !aiEnabled;
         if (!aiEnabled) input.value = "0";
         else if ((toggledOn && Number(input.value) === 0) || Number(input.value) < (input.name === "max_ai_tool_calls" ? 1 : 0)) input.value = String(defaultValue);
       });
     };
     form.addEventListener("input", invalidate);
     form.addEventListener("change", invalidate);
+    bindAutomaticScanEstimate(form, estimateDiscoveryMethod, () => {
+      delete state.discoveryEstimates[form.dataset.discoveryMethodForm];
+      renderDiscoveryMethodEstimate(form.dataset.discoveryMethodForm);
+    });
   });
   $$('[data-retry-discovery-methods]').forEach(button => button.addEventListener("click", loadDiscoveryMethods));
 }
@@ -5889,8 +6508,11 @@ function renderDiscoveryMethodPanels() {
     const root = $(`#discovery-method-${tab.id}`);
     if (root) root.innerHTML = discoveryMethodPanelMarkup(tab);
   });
+  addScanFieldHelp($("#scan-methods-content"));
   bindDiscoveryMethodForms();
-  enhanceMultiChecklists($("#view-intelligence"));
+  syncDiscoveryProviderChoices();
+  if (discoveryTabs().some(tab => tab.kind === "method" && tab.id === state.discoveryTab)) refreshSelectedScanEstimate();
+  enhanceMultiChecklists($("#scan-methods-content"));
   renderDiscoveryMethodRuns();
 }
 
@@ -5908,6 +6530,7 @@ function discoveryMethodRequest(form) {
   const maxAIWebReviews = aiResolution ? Number(form.elements.max_ai_web_reviews.value) : 0;
   if (maxAIWebReviews > maxAIReviews) throw new Error("AI web reviews cannot exceed total AI candidate reviews");
   return {
+    mission_id:selectedScanMission(),
     method: tab.api_id,
     suggestion_ids: suggestionIds,
     scanner_ids: scannerIds,
@@ -5929,29 +6552,14 @@ function discoveryMethodRequest(form) {
 async function estimateDiscoveryMethod(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  const button = form.querySelector('button[type="submit"]');
-  if (scanActionBlocked(button) || state.discoveryStarting || !form.reportValidity()) return;
+  if (state.discoveryStarting || scanControlLocks.has(form) || !form.checkValidity()) return;
   const tabId = form.dataset.discoveryMethodForm;
-  delete state.discoveryEstimates[tabId];
+  const request = discoveryMethodRequest(form);
+  const payload = await requestScanEstimate(event, "/api/discovery-methods/estimates", () => discoveryMethodRequest(form));
+  if (!payload) return;
+  const estimate = payload.estimate || payload;
+  state.discoveryEstimates[tabId] = {payload, request:estimate.request || request, fingerprint:JSON.stringify(request)};
   renderDiscoveryMethodEstimate(tabId);
-  button.textContent = "Estimating…";
-  try {
-    const request = discoveryMethodRequest(form);
-    setScanControlsLocked(form, true);
-    const payload = await api("/api/discovery-methods/estimates", { method: "POST", body: JSON.stringify(request) });
-    setScanControlsLocked(form, false);
-    if (JSON.stringify(discoveryMethodRequest(form)) !== JSON.stringify(request)) throw new Error("Scan settings changed; estimate again");
-    const estimate = payload.estimate || payload;
-    state.discoveryEstimates[tabId] = { payload, request: estimate.request || request, fingerprint: JSON.stringify(request) };
-    renderDiscoveryMethodEstimate(tabId);
-  } catch (error) {
-    delete state.discoveryEstimates[tabId];
-    renderDiscoveryMethodEstimate(tabId, error.message);
-    showToast(error.message);
-  } finally {
-    setScanControlsLocked(form, false);
-    button.textContent = "Estimate scan";
-  }
 }
 
 function renderDiscoveryMethodEstimate(tabId, error = "") {
@@ -5990,7 +6598,7 @@ function renderDiscoveryMethodEstimate(tabId, error = "") {
   const runnable = estimate.runnable !== false && blockers.length === 0;
   const activeRunBlocksStart = tabId !== "company_intelligence" && Boolean(activeDiscoveryRunForTab(discoveryTabs().find(tab => tab.id === tabId)));
   root.innerHTML = `<div class="panel-head"><h3>Bounded estimate</h3><span class="badge ${usesOpenAI ? "" : "moss"}">${escapeHtml(costBadge)}</span></div><div class="discovery-method-estimate-body">
-    <p class="discovery-estimate-kicker">Direct public work</p>
+    <details><summary>Work and provider limits</summary><p class="discovery-estimate-kicker">Direct public work</p>
     <div class="web-scan-stats"><span><small>Sources</small><strong>${formatNumber(sourceCount)}</strong></span><span><small>Candidate cap</small><strong>${formatNumber(candidateCap)}</strong></span><span><small>Page requests</small><strong>≤ ${formatNumber(maxPageRequests)}</strong></span><span><small>Websites</small><strong>≤ ${formatNumber(networkInspections)}</strong></span></div>
     <p class="discovery-estimate-kicker">Provider call caps</p>
     ${knownMaximum > 0 ? `<small>Known people maximum ${maximumCostMoney(knownMaximum)}</small>` : ""}
@@ -5998,6 +6606,7 @@ function renderDiscoveryMethodEstimate(tabId, error = "") {
     <div class="discovery-provider-calls"><span><small>Source resolutions</small><strong>≤ ${formatNumber(providerCaps.sourceResolutions)}</strong></span><span><small>Source web calls</small><strong>≤ ${formatNumber(providerCaps.sourceWebCalls)}</strong></span><span><small>Candidate reviews</small><strong>≤ ${formatNumber(providerCaps.candidateReviews)}</strong></span><span><small>Web reviews</small><strong>≤ ${formatNumber(providerCaps.webReviews)}</strong></span><span><small>Apify</small><strong>${formatNumber(providerCaps.apify)}</strong></span><span><small>People searches</small><strong>≤ ${formatNumber(providerCalls.treg_people_searches || 0)}</strong></span><span><small>Microlink fallbacks</small><strong>≤ ${formatNumber((providerCalls.microlink_source_pages || 0) + (providerCalls.microlink_website_fallbacks || 0))}</strong></span></div>
     ${estimate.cost_note ? `<p class="discovery-estimate-note">${escapeHtml(estimate.cost_note)}</p>` : ""}
     ${omittedSourceCount ? `<p class="discovery-estimate-note"><strong>${formatNumber(omittedSourceCount)} fresh source${omittedSourceCount === 1 ? "" : "s"} omitted automatically.</strong> Only due work is included.</p>` : ""}
+    </details>
     ${warnings.length ? `<ul class="paid-warnings">${warnings.map(item => `<li>${escapeHtml(typeof item === "string" ? item : item.message || JSON.stringify(item))}</li>`).join("")}</ul>` : ""}
     ${blockers.length ? `<ul class="paid-warnings">${blockers.map(item => `<li>${escapeHtml(typeof item === "string" ? item : item.message || JSON.stringify(item))}</li>`).join("")}</ul>` : ""}
     ${error ? `<p class="paid-run-error">${escapeHtml(error)}</p>` : ""}
@@ -6012,16 +6621,16 @@ async function startDiscoveryMethod(event) {
   const form = $(`[data-discovery-method-form="${tabId}"]`);
   if (!stored || !form || state.discoveryStarting || scanActionBlocked(event.currentTarget) || scanControlLocks.has(form)) return;
   if (tabId !== "company_intelligence" && activeDiscoveryRunForTab(discoveryTabs().find(tab => tab.id === tabId))) {
-    showToast("This scan method is already scanning");
+    showToast("This scan method is already scanning", "info");
     return;
   }
   let current;
   try { current = discoveryMethodRequest(form); }
-  catch (error) { showToast(error.message); return; }
+  catch (error) { showToast(error.message, "error"); return; }
   if (JSON.stringify(current) !== stored.fingerprint) {
     delete state.discoveryEstimates[tabId];
     renderDiscoveryMethodEstimate(tabId);
-    showToast("Scan settings changed; estimate again");
+    scanEstimateRefresh.get(form)?.();
     return;
   }
   state.discoveryStarting = true;
@@ -6048,7 +6657,7 @@ async function startDiscoveryMethod(event) {
     pollDiscoveryMethodStatus();
   } catch (error) {
     errorMessage = error.message;
-    showToast(error.message);
+    showToast(error.message, "error");
   } finally {
     state.discoveryStarting = false;
     setScanControlsLocked(form, false);
@@ -6075,6 +6684,26 @@ function discoveryProgressPercent(run) {
   return total > 0 ? Math.max(0, Math.min(100, completed / total * 100)) : null;
 }
 
+function discoveryErrorSummary(error) {
+  if (!error) return "";
+  const entries = String(error).split(/;\s*(?=[^;]*https?:\/\/)/);
+  const hosts = new Set();
+  const other = [];
+  let throttled = 0;
+  for (const entry of entries) {
+    if (/HTTP 429|ProviderRateLimitDeferred/.test(entry)) {
+      throttled += 1;
+      const urls = entry.match(/https?:\/\/[^\s;]+/g) || [];
+      for (const url of urls) {
+        try { hosts.add(new URL(url).hostname); } catch (_) { /* Keep the error below. */ }
+      }
+    } else if (entry.trim()) other.push(entry.trim());
+  }
+  if (!throttled) return String(error);
+  const target = hosts.size ? [...hosts].join(", ") : "Source";
+  return [`${target}: rate limited (HTTP 429). Remaining pages stay due for retry.`, ...new Set(other)].join(" ");
+}
+
 function discoveryRunMarkup(run, { compact = false } = {}) {
   if (!run) return "";
   const status = String(run.status || "unknown").toLowerCase();
@@ -6085,11 +6714,13 @@ function discoveryRunMarkup(run, { compact = false } = {}) {
   const percent = terminal ? 100 : Math.max(0, Math.min(100, Number.isFinite(rawPercent) ? rawPercent : 0));
   const candidates = Number(firstValue(run, ["candidates_persisted", "candidates", "summary.candidates_persisted", "summary.candidates"], 0));
   const hydrated = Number(firstValue(run, ["candidates_hydrated", "hydrated", "summary.candidates_hydrated"], 0));
-  const pages = Number(firstValue(run, ["pages_fetched", "documents_fetched", "summary.pages_fetched"], 0));
-  const error = run.error || run.summary?.error;
+  const pages = Number(firstValue(run, ["pages_fetched", "summary.pages_fetched"], 0));
+  const documents = Number(firstValue(run, ["documents_fetched", "summary.documents_fetched"], 0));
+  const error = discoveryErrorSummary(run.error || run.summary?.error);
   const stats = [];
   if (total || completed) stats.push(`<span><strong>${formatNumber(completed)}</strong> / ${formatNumber(total || completed)} sources</span>`);
-  if (pages) stats.push(`<span><strong>${formatNumber(pages)}</strong> pages</span>`);
+  if (pages) stats.push(`<span><strong>${formatNumber(pages)}</strong> ${pages === 1 ? "page" : "pages"}</span>`);
+  if (documents) stats.push(`<span><strong>${formatNumber(documents)}</strong> ${documents === 1 ? "document" : "documents"}</span>`);
   if (candidates) stats.push(`<span><strong>${formatNumber(candidates)}</strong> candidates</span>`);
   if (hydrated) stats.push(`<span><strong>${formatNumber(hydrated)}</strong> hydrated</span>`);
   const message = !ACTIVE_RUN_STATES.has(status) && run.message && run.message !== error ? run.message : "";
@@ -6118,6 +6749,18 @@ function renderDiscoveryMethodRuns() {
   });
 }
 
+function discoveryOptionAvailable(tab, running) {
+  if (tab.id === "paid_ads") {
+    const capabilityKnown = state.adDiscoveryOverview || discoveryCapability("apify").ready
+      || state.discoveryMethods?.capabilities?.apify === false;
+    return running || !capabilityKnown || adDiscoveryTokenConfigured();
+  }
+  if (!discoveryTabReady(tab)) return running;
+  if (!state.discoveryMethods || state.discoveryMethods._error) return true;
+  if (tab.id === "company_intelligence") return availableDiscoveryScanners(tab).length > 0;
+  return !tab.source_kinds.length || discoveryRunnableSources(tab).length > 0;
+}
+
 function renderDiscoveryTabs() {
   const tabs = discoveryTabs();
   const pending = Number(state.intelligence?.counts?.pending || 0);
@@ -6135,6 +6778,7 @@ function renderDiscoveryTabs() {
     const running = Boolean(methodRun);
     const tabRunning = running || (tab.id === "web_ct" && ACTIVE_RUN_STATES.has(String(state.webScanStatus?.status || "").toLowerCase())) || (tab.id === "paid_ads" && paidActive) || (tab.id === "find_sources" && scoutActive);
     const ready = discoveryTabReady(tab);
+    button.hidden = !discoveryOptionAvailable(tab, tabRunning);
     button.classList.toggle("running", tabRunning);
     button.classList.toggle("needs-setup", !ready);
     meta.textContent = tabRunning
@@ -6167,7 +6811,9 @@ function renderDiscoveryTabs() {
       if (fill) fill.style.width = percent == null ? "38%" : `${percent}%`;
     }
   });
-  selectDiscoveryTab(state.discoveryTab);
+  const selected = state.discoveryTab;
+  selectDiscoveryTab(selected);
+  if (selected !== state.discoveryTab) refreshSelectedScanEstimate();
   renderAggregateScanState();
 }
 
@@ -6190,7 +6836,7 @@ async function loadDiscoveryMethods() {
 }
 
 async function pollDiscoveryMethodStatus() {
-  if (state.discoveryPollInFlight || !["intelligence", "sources"].includes(state.activeView)) return;
+  if (state.discoveryPollInFlight || !["smart_scan", "sources"].includes(state.activeView)) return;
   clearTimeout(state.discoveryPollTimer);
   state.discoveryPollInFlight = true;
   try {
@@ -6205,7 +6851,10 @@ async function pollDiscoveryMethodStatus() {
       if (state.activeView === "sources") await loadSources();
       state.discoveryPollTimer = setTimeout(pollDiscoveryMethodStatus, 2500);
     } else {
-      if (previousRuns.length) showToast(state.discoveryRun?.message || `Scan ${state.discoveryRun?.status || "finished"}`);
+      if (previousRuns.length) {
+        showToast(state.discoveryRun?.message || `Scan ${state.discoveryRun?.status || "finished"}`, scanToastTone(state.discoveryRun?.status));
+        await loadDiscoveryMethods();
+      }
       await refreshVisibleData();
     }
   } catch (error) {
@@ -6230,7 +6879,7 @@ async function startSourceScout(event) {
   event.preventDefault();
   if (state.sourceScoutStarting || state.intelligence?.scout_status?.status === "running") return;
   if (!sourceScoutAvailable()) {
-    showToast("Add an OpenAI API key in Settings before finding more sources");
+    showToast("Add an OpenAI API key in Settings before finding more sources", "error");
     syncSourceScoutControls();
     return;
   }
@@ -6242,6 +6891,7 @@ async function startSourceScout(event) {
   const request = useDefaults
     ? {}
     : { max_suggestions: Number(form.elements.max_suggestions.value), max_tool_calls: Number(form.elements.max_tool_calls.value) };
+  request.mission_id = selectedScanMission();
   state.sourceScoutStarting = true;
   syncSourceScoutControls();
   try {
@@ -6250,7 +6900,7 @@ async function startSourceScout(event) {
     showToast(useDefaults ? "Finding more sources" : "Source scout started");
     pollSourceScout();
   } catch (error) {
-    showToast(error.message);
+    showToast(error.message, "error");
   } finally {
     state.sourceScoutStarting = false;
     syncSourceScoutControls();
@@ -6268,7 +6918,7 @@ function syncSourceScoutControls() {
       ? "Starting…"
       : running
         ? usesDefaults ? "Finding…" : "Scout scanning"
-        : !available && !usesDefaults ? "OpenAI key required" : usesDefaults ? "Find More · AI" : "Run AI scout · usage caps";
+        : !available && !usesDefaults ? "OpenAI key required" : usesDefaults ? "Find More · AI" : "Find sources";
   });
   $$('[data-source-scout-form] input').forEach(input => { input.disabled = !available || running; });
   const availability = $("#source-scout-availability");
@@ -6286,7 +6936,9 @@ function scanOverviewItems() {
     rows.push({ label, run, status, parent });
   };
   const live = state.scanOverview;
-  add("Smart Scan", live?.smart || state.smartScan, true);
+  const smart = state.activeView === "smart_scan" || state.smartScanStarting
+    ? state.smartScan || live?.smart : live?.smart || state.smartScan;
+  add("Smart Scan", smart, true);
   add(state.importScanJobId && state.webScanStatus?.job_id === state.importScanJobId ? "Import" : "Web & CT", state.webScanStarting ? {status:"starting"} : state.webScanStatus);
   const runs = [...(live?.methods || []), ...(state.discoveryRuns || []), ...(state.discoveryMethods?.recent_runs || [])];
   const seen = new Set();
@@ -6296,14 +6948,11 @@ function scanOverviewItems() {
     seen.add(key);
     add(run.method_label || humanize(run.method || "Source scan"), run);
   }
-  add("Paid ads", live?.paid || state.adDiscoveryRun);
-  add("Find sources", live?.scout || state.intelligence?.scout_status);
-  const localPeople = state.peopleHydration?.run;
-  const remotePeople = live?.people;
-  const localStamp = localPeople?.updated_at || localPeople?.finished_at || localPeople?.started_at || "";
-  const remoteStamp = remotePeople?.updated_at || remotePeople?.finished_at || remotePeople?.started_at || "";
-  add("People", state.peopleHydrationStarting || localStamp >= remoteStamp
-    ? localPeople || remotePeople : remotePeople);
+  const stamp = run => run?.updated_at || run?.finished_at || run?.started_at || "";
+  const latest = (local, remote) => stamp(local) >= stamp(remote) ? local || remote : remote;
+  add("Paid ads", latest(state.adDiscoveryRun, live?.paid));
+  add("Find sources", latest(state.intelligence?.scout_status, live?.scout));
+  add("People", latest(state.peopleHydration?.run, live?.people));
   return rows;
 }
 
@@ -6313,8 +6962,103 @@ function scanProgressUnit(phase) {
     free_intelligence:"enriched"})[phase] || "inspected";
 }
 
+let standaloneScanFocus = null;
+function chooseStandaloneScan(rows, previous = null) {
+  if (rows.some(row => row.parent && smartScanActive(row.run))) return null;
+  const live = rows.filter(row => !row.parent && ACTIVE_RUN_STATES.has(row.status));
+  if (live.length === 1) return live[0];
+  if (live.length > 1) return previous ? live.find(row => scanFocusKey(row) === scanFocusKey(previous)) || null : null;
+  return previous ? rows.find(row => !row.parent && scanFocusKey(row) === scanFocusKey(previous)) || previous : null;
+}
+function scanFocusKey(row) {
+  return `${row.label}:${row.run.id || row.run.run_id || row.run.job_id || row.run.started_at || "latest"}`;
+}
+function renderStandaloneScanWorkspace(rows) {
+  const root = $("#smart-scan-shell");
+  if (!root || root.dataset.initialLoading === "true") return;
+  const previous = standaloneScanFocus;
+  standaloneScanFocus = state.microlinkOverview ? null : chooseStandaloneScan(rows, previous);
+  root.classList.toggle("has-standalone-scan", Boolean(standaloneScanFocus));
+  let panel = $("#standalone-scan-progress", root);
+  if (!standaloneScanFocus) {
+    if (previous) { standaloneScanFocus = null; renderSmartScan(state.smartScan || {}); }
+    return;
+  }
+  if (!panel) {
+    panel = document.createElement("section");
+    panel.id = "standalone-scan-progress";
+    panel.className = "standalone-scan-progress";
+    $(".smart-scan-progress-column", root).append(panel);
+  }
+  const {label, run, status} = standaloneScanFocus;
+  const busy = ACTIVE_RUN_STATES.has(status);
+  if (busy && (!previous || scanFocusKey(previous) !== scanFocusKey(standaloneScanFocus))) {
+    const dialog = $("#smart-scan-options-dialog");
+    if (dialog?.open) dialog.close();
+  }
+  const total = Number(firstValue(run, ["total_candidates", "company_count", "sources_total", "queries_total", "total", "progress.total"], 0));
+  const done = Number(firstValue(run, ["processed_companies", "processed", "sources_completed", "queries_completed", "completed", "progress.completed"], 0));
+  const percent = discoveryProgressPercent(run) ?? (total > 0 ? Math.min(100, done / total * 100) : null);
+  const phase = run.current_company || run.message || humanize(run.phase || status);
+  const markup = `<div class="smart-scan-phase-head"><span>${escapeHtml(label)} · ${escapeHtml(humanize(status))}</span>${percent != null ? `<strong>${Number(percent.toFixed(1))}%</strong>` : ""}</div>
+    <progress class="standalone-scan-track" max="100" ${percent != null ? `value="${percent}"` : ""} aria-label="${escapeHtml(label)} progress"></progress>
+    <p class="standalone-scan-current" role="status">${escapeHtml(phase)}</p>
+    ${total ? `<p class="smart-scan-note">${formatNumber(done)} / ${formatNumber(Math.max(total, done))} items processed</p>` : ""}`;
+  if (panel.innerHTML !== markup) panel.innerHTML = markup;
+  const launch = $("#scan-launch-trigger", root);
+  launch.textContent = busy ? `${label} is running…` : "Smart Scan";
+  launch.dataset.running = String(busy);
+  const errors = Array.isArray(run.errors) ? run.errors : run.error ? [run.error] : [];
+  const events = Array.isArray(run.events) ? run.events : Array.isArray(run.logs) ? run.logs : [];
+  const selected = state.smartScanTerminalTab === "errors" ? errors : events;
+  const lines = selected.map(entry => smartScanTerminalLine(typeof entry === "string"
+    ? {message:entry, level:state.smartScanTerminalTab === "errors" ? "error" : "info"}
+    : {...entry, message:entry.message || entry.detail || phase}));
+  if (!lines.length) lines.push(smartScanTerminalLine({message:state.smartScanTerminalTab === "errors"
+    ? "No failures reported for this scan." : phase, level:"info"}));
+  const terminal = $("#smart-terminal-lines", root);
+  renderTerminalRows(terminal, lines, {follow:smartScanTerminalNearBottom(terminal)});
+  highlightLatestTerminalActivity(terminal, busy && state.smartScanTerminalTab === "activity");
+  $("#smart-terminal-error-count", root).textContent = formatNumber(run.error_total ?? errors.length);
+  $("#smart-terminal-meta", root).textContent = label;
+  $("#copy-smart-scan-errors", root).hidden = true;
+  $("#smart-terminal-error-note", root).hidden = state.smartScanTerminalTab !== "errors";
+  $("#smart-terminal-elapsed", root).textContent = smartScanElapsedLabel(run);
+}
+
+function scanPillSuccesses(run) {
+  const count = paths => {
+    const value = firstValue(run, paths, null);
+    return value != null && Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : null;
+  };
+  const added = count(["new_companies_added", "summary.new_companies_added"]);
+  const succeeded = count(["summary.success_count", "success_count"]);
+  const saved = count(["candidates_persisted", "summary.candidates_persisted"]);
+  const rows = [];
+  if (succeeded != null) rows.push(`<span class="scan-overview-new-companies">${formatNumber(succeeded)} succeeded</span>`);
+  if (added != null) rows.push(`<span class="scan-overview-new-companies">found ${formatNumber(added)} new ${added === 1 ? "company" : "companies"}</span>`);
+  else if (saved != null) rows.push(`<span class="scan-overview-new-companies">${formatNumber(saved)} ${saved === 1 ? "company" : "companies"} saved</span>`);
+  return rows.join("");
+}
+
+function scanOverviewPills(rows, focused = null) {
+  const parent = rows.find(row => row.parent);
+  if (state.activeView === "smart_scan") {
+    if (state.microlinkOverview) return [state.microlinkOverview];
+    if (focused) return [focused];
+    if (!parent) return [];
+  } else if (!parent || !smartScanActive(parent.run)) {
+    return rows.filter(row => ACTIVE_RUN_STATES.has(row.status));
+  }
+  const sameId = (expected, actual) => expected != null && actual != null && String(expected) === String(actual);
+  return [parent, ...rows.filter(({label, run}) =>
+    (label === "Paid ads" && sameId(parent.run.paid_ads_run_id, run.id ?? run.run_id))
+    || (label === "Web & CT" && sameId(parent.run.child_scan_job_id, run.job_id)))];
+}
+
 function renderAggregateScanState() {
   const rows = scanOverviewItems();
+  renderStandaloneScanWorkspace(rows);
   const active = rows.filter(row => ACTIVE_RUN_STATES.has(row.status) || (row.parent && smartScanActive(row.run)));
   const root = $("#scan-state");
   if (root) {
@@ -6323,16 +7067,13 @@ function renderAggregateScanState() {
   }
   const overview = $("#scan-overview");
   if (!overview) return;
-  const visible = [...active, ...rows.filter(row => !active.includes(row)).sort((a, b) => String(b.run.finished_at || b.run.updated_at || b.run.started_at || "").localeCompare(String(a.run.finished_at || a.run.updated_at || a.run.started_at || ""))).slice(0, 4)];
+  const visible = scanOverviewPills(rows, standaloneScanFocus);
   overview.hidden = !visible.length;
-  overview.innerHTML = visible.map(({ label, run, status, parent }) => {
-    const issues = ["failed", "partial", "interrupted"].includes(status);
+  const markup = visible.map(({ label, run, status, parent }) => {
+    const issues = ["failed", "interrupted"].includes(status);
     const busy = ACTIVE_RUN_STATES.has(status) || (parent && smartScanActive(run));
     const percent = parent ? smartScanProgress(run) : discoveryProgressPercent(run);
     const progress = busy && percent != null ? `<progress max="100" value="${percent}" aria-label="${escapeHtml(label)} progress"></progress>` : "";
-    const summary = run.summary || {};
-    const retry = Array.isArray(summary.retryable_hosts) ? summary.retryable_hosts.length : null;
-    const errors = parent ? Number(run.error_total || 0) : null;
     const web = label === "Web & CT" || label === "Import";
     const detail = label === "People" ? [
       run.company_count != null ? `${formatNumber(run.processed_companies || 0)} / ${formatNumber(run.company_count)} companies` : "",
@@ -6341,12 +7082,19 @@ function renderAggregateScanState() {
       scanTerminology((run.phase || "starting").replaceAll("_", " ")),
       run.total_candidates ? `${formatNumber(run.processed || 0)} / ${formatNumber(run.total_candidates)} ${scanProgressUnit(run.phase)}` : run.discovered != null || run.max_candidates ? `${formatNumber(run.discovered || 0)} found${run.max_candidates ? ` · up to ${formatNumber(run.max_candidates)}` : ""}` : "",
     ].filter(Boolean).join(" · ") : "";
-    const newCompanies = parent && run.new_companies_added != null ? Number(run.new_companies_added) : null;
-    const outcomes = [summary.success_count != null ? `<span>${formatNumber(summary.success_count)} succeeded</span>` : "", errors ? `<span class="scan-overview-error">${formatNumber(errors)} failures</span>` : "", newCompanies != null ? `<span class="scan-overview-new-companies">• ${formatNumber(newCompanies)} new ${newCompanies === 1 ? "company" : "companies"}</span>` : "", summary.failure_count != null ? `<span class="${Number(summary.failure_count) > 0 ? "scan-overview-error" : ""}">${formatNumber(summary.failure_count)} failed</span>` : "", retry ? `<span>${formatNumber(retry)} retryable</span>` : ""].filter(Boolean).join("");
+    const outcomes = issues ? "" : scanPillSuccesses(run);
+    const pillStatus = ["complete", "completed", "partial"].includes(status)
+      ? outcomes ? "" : "Finished" : humanize(status);
     const cardTag = state.activeView === "smart_scan" ? "article" : "a";
     const cardLink = cardTag === "a" ? ' href="#smart_scan"' : "";
-    return `<${cardTag}${cardLink} class="scan-overview-item ${issues || errors || Number(summary.failure_count) > 0 ? "has-errors" : ""} ${busy ? "is-active" : ""}"><div class="scan-overview-content"><div class="scan-overview-identity"><strong title="${escapeHtml(label)}">${escapeHtml(label)}</strong><span class="scan-overview-status">${escapeHtml(humanize(status))}</span>${busy && percent != null ? `<span class="scan-overview-percent">${Number(percent.toFixed(1))}%</span>` : ""}</div>${detail || (parent && run.resumed_after_restart_at) ? `<div class="scan-overview-detail">${detail ? `<span title="${escapeHtml(detail)}">${escapeHtml(detail)}</span>` : ""}${parent && run.resumed_after_restart_at ? `<span>Restart recovery</span>` : ""}</div>` : ""}${outcomes ? `<div class="scan-overview-outcomes">${outcomes}</div>` : ""}${progress}</div></${cardTag}>`;
+    const activityDot = parent && busy
+      ? `<span class="scan-overview-orb${status === "paused" ? "" : " is-pulsing"}" aria-hidden="true"></span>` : "";
+    return `<${cardTag}${cardLink} class="scan-overview-item ${issues ? "has-errors" : ""} ${busy ? "is-active" : ""}"><div class="scan-overview-content"><div class="scan-overview-identity">${activityDot}<strong title="${escapeHtml(label)}">${escapeHtml(label)}</strong>${pillStatus ? `<span class="scan-overview-status">${escapeHtml(pillStatus)}</span>` : ""}${busy && percent != null ? `<span class="scan-overview-percent">${Number(percent.toFixed(parent ? 2 : 1))}%</span>` : ""}</div>${detail || (parent && run.resumed_after_restart_at) ? `<div class="scan-overview-detail">${detail ? `<span title="${escapeHtml(detail)}">${escapeHtml(detail)}</span>` : ""}${parent && run.resumed_after_restart_at ? `<span>Restart recovery</span>` : ""}</div>` : ""}${outcomes ? `<div class="scan-overview-outcomes">${outcomes}</div>` : ""}${progress}</div></${cardTag}>`;
   }).join("");
+  if (overview.dataset.renderedMarkup !== markup) {
+    overview.innerHTML = markup;
+    overview.dataset.renderedMarkup = markup;
+  }
 }
 
 function adDiscoveryConfig() {
@@ -6365,6 +7113,7 @@ function adDiscoveryConfig() {
     throw new Error("Enable at least one advertising surface");
   }
   return {
+    mission_id:selectedScanMission(),
     mode,
     meta_enabled: form.elements.meta_enabled.checked,
     meta_queries: metaQueries,
@@ -6403,6 +7152,11 @@ function syncAdDiscoveryForm() {
   form.elements.tiktok_ads_per_advertiser.disabled = !form.elements.tiktok_library_enabled.checked;
   form.elements.tiktok_top_ads_per_advertiser.disabled = !form.elements.tiktok_top_enabled.checked;
   form.elements.website_hydration_limit.disabled = !form.elements.hydrate_websites.checked;
+  for (const name of ["meta_queries", "meta_ads_per_query", "max_new_advertisers",
+    "existing_target_limit", "tiktok_ads_per_advertiser", "tiktok_top_ads_per_advertiser", "website_hydration_limit"]) {
+    const input = form.elements[name];
+    if (input.labels?.[0]) input.labels[0].hidden = input.disabled;
+  }
 }
 
 function handleAdDiscoveryDraftChange() {
@@ -6471,7 +7225,7 @@ function renderAdDiscoveryQuote() {
     <div class="panel-head"><div><h3>Cost estimate</h3><span class="section-meta">${estimate.expires_at ? `Expires ${escapeHtml(relativeTime(estimate.expires_at))}` : "Short-lived quote"}</span></div><span class="badge ${runnable ? "moss" : "warn"}">${runnable ? "Ready to approve" : !adDiscoveryTokenConfigured() ? "Token required" : cap == null ? "Cap unavailable" : "Scan active"}</span></div>
     <div class="paid-quote-body">
       <div class="paid-cost-total"><span>Provider hard cap</span><strong>${maximumCostMoney(cap)}</strong><small>Estimated known charge ${costMoney(known)}${estimate.budget_limited ? " · limited by your budget" : ""}</small></div>
-      <div class="paid-cost-breakdown">${lineItems.length ? lineItems.map(item => {
+      <details><summary>Cost breakdown</summary><div class="paid-cost-breakdown">${lineItems.length ? lineItems.map(item => {
         const itemCost = costFrom(item, ["known_cost_usd", "result_cost_usd", "maximum_cost_usd", "cost_usd"], ["cost_microusd"], 0);
         const results = firstValue(item, ["conservative_max_results", "nominal_max_results", "max_results", "quantity"], null);
         const details = [item.actor_runs != null ? `${formatNumber(item.actor_runs)} actor scan${Number(item.actor_runs) === 1 ? "" : "s"}` : "", results == null ? "" : `up to ${formatNumber(results)} results`].filter(Boolean).join(" · ");
@@ -6479,9 +7233,10 @@ function renderAdDiscoveryQuote() {
         const surface = item.kind && item.surface ? `${humanize(item.surface)} · ` : "";
         return `<div><span><strong>${escapeHtml(humanize(label))}</strong>${details ? `<small>${escapeHtml(surface + details)}</small>` : ""}</span><b>${costMoney(itemCost)}</b></div>`;
       }).join("") : `<div><span><strong>Bounded provider work</strong><small>The server will enforce the approved total.</small></span><b>${maximumCostMoney(cap)}</b></div>`}</div>
+      </details>
       ${(warnings.length || !runnable) ? `<ul class="paid-warnings">${!runnable ? `<li>Add an Apify token in Settings before scanning.</li>` : ""}${warnings.map(item => `<li>${escapeHtml(typeof item === "string" ? item : item.message || JSON.stringify(item))}</li>`).join("")}</ul>` : ""}
       <label class="paid-confirmation"><input id="approve-paid-cap" type="checkbox" ${runnable ? "" : "disabled"} /><span>I approve a maximum provider charge of <strong>${maximumCostMoney(cap)}</strong> for this manual scan.</span></label>
-      <button class="button primary paid-run-button" id="start-paid-discovery" type="button" disabled>Scan with ${maximumCostMoney(cap)} cap</button>
+      <button class="button primary paid-run-button" id="start-paid-discovery" type="button" disabled>Scan · ${costMoney(known)} est. · ${maximumCostMoney(cap)} max</button>
     </div>`;
   const approval = $("#approve-paid-cap");
   const runButton = $("#start-paid-discovery");
@@ -6492,28 +7247,11 @@ function renderAdDiscoveryQuote() {
 async function estimateAdDiscovery(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  const button = $("#estimate-paid-discovery");
-  if (scanActionBlocked(button) || state.adDiscoveryStarting || adDiscoveryRunActive() || !form.reportValidity()) return;
-  state.adDiscoveryEstimating = true;
-  state.adDiscoveryEstimate = null;
+  if (state.adDiscoveryStarting || adDiscoveryRunActive() || scanControlLocks.has(form) || !form.checkValidity()) return;
+  const payload = await requestScanEstimate(event, "/api/ad-discovery/estimates", adDiscoveryConfig);
+  if (!payload) return;
+  state.adDiscoveryEstimate = normalizeAdEstimate(payload, adDiscoveryConfig());
   renderAdDiscoveryQuote();
-  button.textContent = "Estimating…";
-  try {
-    const config = adDiscoveryConfig();
-    const draft = JSON.stringify(config);
-    setScanControlsLocked(form, true);
-    const payload = await api("/api/ad-discovery/estimates", { method: "POST", body: JSON.stringify(config) });
-    if (JSON.stringify(adDiscoveryConfig()) !== draft) throw new Error("Scan settings changed; estimate again");
-    state.adDiscoveryEstimate = normalizeAdEstimate(payload, config);
-  } catch (error) {
-    state.adDiscoveryEstimate = null;
-    showToast(error.message);
-  } finally {
-    state.adDiscoveryEstimating = false;
-    setScanControlsLocked(form, false);
-    button.textContent = "Estimate cost";
-    renderAdDiscoveryQuote();
-  }
 }
 
 async function startAdDiscovery() {
@@ -6522,8 +7260,13 @@ async function startAdDiscovery() {
   const form = $("#paid-discovery-form");
   if (!estimate?.quote_id || !approval?.checked || scanActionBlocked($("#start-paid-discovery"))
       || scanControlLocks.has(form) || state.adDiscoveryStarting || adDiscoveryRunActive()) return;
+  if (JSON.stringify(estimate._draft) !== JSON.stringify(adDiscoveryConfig())
+      || Date.parse(estimate.expires_at) <= Date.now()) {
+    scanEstimateRefresh.get(form)?.();
+    return;
+  }
   const cap = adEstimateCap(estimate);
-  if (!Number.isFinite(cap) || cap <= 0) { showToast("Provider maximum unavailable; estimate again"); return; }
+  if (!Number.isFinite(cap) || cap <= 0) { showToast("Provider maximum unavailable; estimate again", "error"); return; }
   state.adDiscoveryApprovedCap = cap;
   state.adDiscoveryStarting = true;
   setScanControlsLocked(form, true);
@@ -6539,7 +7282,7 @@ async function startAdDiscovery() {
     showToast("Paid scan started");
     pollAdDiscoveryStatus();
   } catch (error) {
-    showToast(error.message);
+    showToast(error.message, "error");
     if (button) { button.disabled = false; button.textContent = `Scan with ${maximumCostMoney(cap)} cap`; }
   } finally {
     state.adDiscoveryStarting = false;
@@ -6562,11 +7305,11 @@ function adDiscoveryRunActive(run = state.adDiscoveryRun) {
 }
 
 function renderAdDiscoveryRun() {
-  setScanControlsLocked($("#paid-discovery-form"), state.adDiscoveryEstimating || state.adDiscoveryStarting || adDiscoveryRunActive());
+  setScanControlsLocked($("#paid-discovery-form"), state.adDiscoveryStarting || adDiscoveryRunActive());
   const root = $("#paid-discovery-run");
   if (!root) return;
   const run = state.adDiscoveryRun;
-  if (!run || (!run.id && !run.run_id && ["idle", "ready", ""].includes(String(run.status || "").toLowerCase()))) {
+  if (!run || !adDiscoveryRunActive(run)) {
     root.innerHTML = "";
     renderDiscoveryTabs();
     return;
@@ -6617,34 +7360,8 @@ async function cancelAdDiscovery(event) {
   } catch (error) {
     button.disabled = false;
     button.textContent = "Cancel";
-    showToast(error.message);
+    showToast(error.message, "error");
   }
-}
-
-function adDiscoveryRuns() {
-  const source = state.adDiscoveryOverview || {};
-  const value = source.recent_runs || source.runs || source.history?.items || [];
-  return Array.isArray(value) ? value : (value.items || []);
-}
-
-function renderAdDiscoveryHistory() {
-  const root = $("#paid-history-list");
-  if (!root) return;
-  const runs = adDiscoveryRuns();
-  $("#paid-history-count").textContent = `${formatNumber(runs.length)} recent`;
-  root.innerHTML = runs.length ? runs.map(run => {
-    const progress = run.progress || {};
-    const cap = costFrom(run, ["approved_cap_usd", "maximum_charge_usd", "request.max_total_charge_usd"], ["approved_cap_microusd"], 0);
-    const actual = run.cost_unknown ? null : costFrom(run, ["actual_cost_usd", "provider_cost_usd"], ["actual_cost_microusd"], null);
-    return `<article class="paid-history-row">
-      <div><small>Scan</small><strong>#${escapeHtml(run.id || run.run_id || "—")}</strong></div>
-      <div><small>Mode</small><strong>${escapeHtml(humanize(run.mode || run.request?.mode || "unknown"))}</strong></div>
-      <div><small>Status</small><strong>${escapeHtml(humanize(run.status))}</strong></div>
-      <div><small>Yield</small><strong>${formatNumber(progress.links_verified || 0)} verified · ${formatNumber(progress.candidates_promoted || 0)} new</strong></div>
-      <div><small>Cost</small><strong>${actual == null ? "Unknown" : costMoney(actual)} / ${maximumCostMoney(cap)}</strong></div>
-      <div><small>Started</small><strong>${escapeHtml(absoluteDate(run.started_at))}</strong></div>
-    </article>`;
-  }).join("") : `<div class="paid-empty"><strong>No paid scans</strong><span>Your first scan will appear only after you approve an estimate.</span></div>`;
 }
 
 function renderAdDiscoveryLinks() {
@@ -6698,7 +7415,6 @@ function renderAdDiscoveryOverview() {
   }
   renderAdDiscoveryQuote();
   renderAdDiscoveryRun();
-  renderAdDiscoveryHistory();
   renderAdDiscoveryLinks();
   renderDiscoveryTabs();
 }
@@ -6709,7 +7425,7 @@ async function loadAdDiscoveryOverview({ includeStatus = true } = {}) {
   if (includeStatus) requests.push(api("/api/ad-discovery/status"));
   const [overviewResult, linksResult, statusResult] = await Promise.allSettled(requests);
   if (overviewResult.status === "fulfilled") state.adDiscoveryOverview = overviewResult.value;
-  else showToast(overviewResult.reason.message);
+  else showToast(overviewResult.reason.message, "error");
   if (linksResult.status === "fulfilled") {
     const payload = linksResult.value;
     state.adDiscoveryLinks = payload.items || payload.links || payload.results || (Array.isArray(payload) ? payload : []);
@@ -6724,7 +7440,7 @@ async function loadAdDiscoveryOverview({ includeStatus = true } = {}) {
     state.adDiscoveryRun = normalizeAdDiscoveryRun(typeof overviewResult.value.status === "object" ? overviewResult.value.status : { status: overviewResult.value.status });
   }
   renderAdDiscoveryOverview();
-  if (overviewResult.status === "rejected") clearLoadingIndicators("#paid-history-list, #paid-link-body");
+  if (overviewResult.status === "rejected") clearLoadingIndicators("#paid-link-body");
   if (adDiscoveryRunActive()) pollAdDiscoveryStatus();
 }
 
@@ -6740,7 +7456,7 @@ async function pollAdDiscoveryStatus() {
     if (adDiscoveryRunActive()) {
       state.adDiscoveryPollTimer = setTimeout(pollAdDiscoveryStatus, 2500);
     } else {
-      if (previous && previous !== state.adDiscoveryRun?.status) showToast(`Paid scan ${state.adDiscoveryRun?.status || "finished"}`);
+      if (previous && previous !== state.adDiscoveryRun?.status) showToast(`Paid scan ${state.adDiscoveryRun?.status || "finished"}`, scanToastTone(state.adDiscoveryRun?.status));
       await loadAdDiscoveryOverview({ includeStatus: false });
     }
   } catch {
@@ -6757,7 +7473,7 @@ async function updateAdDiscoveryLink(linkId, status, reviewNote = "") {
     await api(`/api/ad-discovery/links/${encodeURIComponent(linkId)}`, { method: "PATCH", body: JSON.stringify(body) });
     showToast(`Mapping ${status}`);
     await loadAdDiscoveryOverview({ includeStatus: false });
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
 }
 
 function humanizeScoutMessage(value = "") {
@@ -6837,7 +7553,7 @@ async function loadResearch() {
   if (!$("#mission-list")) return;
   $("#mission-list").innerHTML = `<p class="empty">${loadingIndicator()}</p>`;
   try { renderResearch(await api("/api/research")); }
-  catch (error) { showToast(error.message); $("#mission-list").innerHTML = `<p class="empty">Research unavailable.</p>`; }
+  catch (error) { showToast(error.message, "error"); $("#mission-list").innerHTML = `<p class="empty">Research unavailable.</p>`; }
 }
 
 function renderIntelligence(data) {
@@ -6869,7 +7585,7 @@ function renderIntelligence(data) {
   $$('[data-scout-message]').forEach(root => {
     root.className = `scout-message ${status}`;
     root.innerHTML = messageMarkup;
-    if (root.id === "sources-scout-message") root.hidden = !["running", "failed"].includes(status);
+    root.hidden = !["running", "failed"].includes(status);
   });
   setScoutActivityTicker(status === "running");
   const statsMarkup = `
@@ -6946,7 +7662,7 @@ async function loadIntelligence({ useCached = false } = {}) {
     writeSourcesViewCache("intelligence", data);
     if (data.scout_status?.status === "running") pollSourceScout();
   }
-  catch (error) { showToast(error.message); clearLoadingIndicators('[data-suggestion-body]'); }
+  catch (error) { showToast(error.message, "error"); clearLoadingIndicators('[data-suggestion-body]'); }
 }
 
 async function pollSourceScout() {
@@ -6961,8 +7677,8 @@ async function pollSourceScout() {
       updateScoutActivity();
       state.scoutPollTimer = setTimeout(pollSourceScout, 2500);
     }
-    if (["complete", "partial"].includes(status.status)) { showToast(status.message || `${formatNumber(status.suggestions)} sources found`); await loadIntelligence(); }
-    if (status.status === "failed") { showToast(humanizeScoutMessage(status.message || "Source scout failed")); await loadIntelligence(); }
+    if (["complete", "partial"].includes(status.status)) { showToast(status.message || `${formatNumber(status.suggestions)} sources found`, scanToastTone(status.status)); await loadIntelligence(); }
+    if (status.status === "failed") { showToast(humanizeScoutMessage(status.message || "Source scout failed"), "error"); await loadIntelligence(); }
   } catch {
     state.scoutPollTimer = setTimeout(pollSourceScout, 4000);
   } finally {
@@ -6995,7 +7711,7 @@ function renderRuns() {
 
 async function loadRuns() {
   try { const result = await api("/api/runs"); state.runs = result.items; if ($("#run-list")) renderRuns(); }
-  catch (error) { showToast(error.message); clearLoadingIndicators("#run-list"); }
+  catch (error) { showToast(error.message, "error"); clearLoadingIndicators("#run-list"); }
 }
 
 async function openProspect(candidateId) {
@@ -7069,7 +7785,7 @@ async function openProspect(candidateId) {
       } catch (error) {
         button.disabled = false;
         button.textContent = "Scan company";
-        showToast(error.message);
+        showToast(error.message, "error");
       }
     });
     $("#detail-exclude").addEventListener("click", async event => {
@@ -7083,7 +7799,7 @@ async function openProspect(candidateId) {
         await refreshVisibleData();
       } catch (error) {
         button.disabled = false;
-        showToast(error.message);
+        showToast(error.message, "error");
       }
     });
     $("#company-scan-enabled").addEventListener("change", async event => {
@@ -7100,7 +7816,7 @@ async function openProspect(candidateId) {
         showToast(workflow.scan_enabled ? "Company included in scans" : "Company excluded from scans");
       } catch (error) {
         toggle.checked = !toggle.checked;
-        showToast(error.message);
+        showToast(error.message, "error");
       } finally {
         toggle.disabled = false;
       }
@@ -7117,7 +7833,7 @@ function syncGoButton(status = state.scanStatus) {
   const webButton = $("#run-web-scan");
   if (webButton) {
     webButton.disabled = state.webScanStarting || active || scanControlLocks.has($("#web-scan-form"));
-    webButton.textContent = state.webScanStarting ? "Starting…" : active ? "Scan scanning" : `Scan web for ${scanCapLabel(state.webScanEstimate)}`;
+    webButton.textContent = state.webScanStarting ? "Starting…" : active ? "Scan scanning" : `Scan web · ${scanCapLabel(state.webScanEstimate)}${state.webScanEstimate?.provider_cost_usd == null ? "" : " max"}`;
   }
 }
 
@@ -7143,11 +7859,11 @@ async function pollScanStatus() {
     state.scanPollTimer = setTimeout(pollScanStatus, active ? 2500 : 5000);
     if (["complete", "partial"].includes(status.status) && wasActive) {
       const terminalMessage = status.status === "partial" ? "Scan completed with partial results" : "Scan complete";
-      showToast(status.message || terminalMessage);
+      showToast(status.message || terminalMessage, scanToastTone(status.status));
       invalidateTargetOverviewCache();
       await refreshVisibleData();
     }
-    if (status.status === "failed" && previous !== "failed") showToast(status.message || "Scan failed");
+    if (status.status === "failed" && previous !== "failed") showToast(status.message || "Scan failed", "error");
   } catch {
     state.scanPollTimer = setTimeout(pollScanStatus, 4000);
   } finally {
@@ -7166,7 +7882,7 @@ async function openOutboundNote(row) {
   dialog.className = "modal compact outbound-note-dialog";
   dialog.setAttribute("aria-labelledby", "outbound-note-title");
   dialog.innerHTML = `<form class="modal-card">
-    <header class="modal-head"><h2 id="outbound-note-title">Note · ${escapeHtml(row.name)}</h2>
+    <header class="modal-head"><h2 id="outbound-note-title" tabindex="-1" autofocus>Note · ${escapeHtml(row.name)}</h2>
       <button type="button" class="icon-button" data-note-close aria-label="Close note">×</button></header>
     <div class="modal-body"><label class="field"><span>Outreach text or notes</span>
       <textarea aria-label="Contact note" maxlength="100000" rows="12" placeholder="Paste your outreach text here…" disabled></textarea></label>
@@ -7189,7 +7905,7 @@ async function openOutboundNote(row) {
   dialog.addEventListener("close", () => dialog.remove(), {once:true});
   copy.addEventListener("click", async () => {
     try {await copyText(area.value); message.textContent = "Copied";}
-    catch {message.textContent = "Could not copy. Select the text and copy it manually."; showToast(message.textContent); area.focus(); area.select();}
+    catch {message.textContent = "Could not copy. Select the text and copy it manually."; showToast(message.textContent, "error"); area.focus(); area.select();}
   });
   dialog.querySelector("form").addEventListener("submit", async event => {
     event.preventDefault();
@@ -7202,7 +7918,7 @@ async function openOutboundNote(row) {
       original = area.value; dialog.close();
       if (state.activeView === "prospects") await loadOutboundProspects();
       showToast("Note saved");
-    } catch (error) {message.textContent = error.message; showToast(error.message);}
+    } catch (error) {message.textContent = error.message; showToast(error.message, "error");}
     finally {busy = false; save.disabled = false; save.textContent = "Save"; area.readOnly = false;}
   });
   document.body.append(dialog); dialog.showModal();
@@ -7212,7 +7928,7 @@ async function openOutboundNote(row) {
     original = data.note; area.value = original;
     area.disabled = false; save.disabled = false; copy.disabled = false;
     message.textContent = ""; area.focus();
-  } catch (error) {if (dialog.isConnected) {message.textContent = error.message; showToast(error.message);}}
+  } catch (error) {if (dialog.isConnected) {message.textContent = error.message; showToast(error.message, "error");}}
 }
 
 async function editOutboundProspect(id) {
@@ -7223,7 +7939,7 @@ async function editOutboundProspect(id) {
       invalidateSalesWorkbench();
       if (state.activeView === "prospects") await loadOutboundProspects();
     });
-  } catch (error) {showToast(error.message);}
+  } catch (error) {showToast(error.message, "error");}
 }
 
 function outboundShell() {
@@ -7238,7 +7954,7 @@ function outboundShell() {
     <div id="outbound-message" role="status"></div>
     <div class="table-wrap outbound-scroll" role="region" aria-labelledby="outbound-title" tabindex="0"><table class="outbound-table">
       <thead><tr><th scope="col">Person</th><th scope="col">Company</th><th scope="col">Contact</th><th scope="col">Phone</th><th scope="col">Status</th><th scope="col">Updated</th></tr></thead>
-      <tbody id="outbound-rows"><tr><td colspan="6" class="loading-row">${loadingIndicator("Loading saved people…")}</td></tr></tbody></table></div>
+      <tbody id="outbound-rows"></tbody></table></div>
     <div class="outbound-paging"><span id="outbound-range"></span><button class="button" id="outbound-prev">Previous</button>
       <button class="button" id="outbound-next">Next</button></div></section>`;
   $("#outbound-filter").addEventListener("change", event => {
@@ -7265,7 +7981,7 @@ function outboundShell() {
       return;
     }
     const company = event.target.closest("[data-outbound-company]");
-    if (company) {event.preventDefault(); void openSalesCompany(Number(company.dataset.outboundCompany), company.dataset.companyKey).catch(error=>showToast(error.message));}
+    if (company) {event.preventDefault(); void openSalesCompany(Number(company.dataset.outboundCompany), company.dataset.companyKey).catch(error=>showToast(error.message, "error"));}
   });
   $("#outbound-rows").addEventListener("change", async event => {
     const control = event.target.closest("[data-outbound-status], [data-outbound-method], [data-outbound-touchpoint]");
@@ -7283,7 +7999,7 @@ function outboundShell() {
         body:JSON.stringify(isMethod ? {contact_method:control.value} : {status:control.value}),
       });
       if (state.activeView === "prospects") await loadOutboundProspects();
-    } catch (error) {control.value = previous; showToast(error.message);}
+    } catch (error) {control.value = previous; showToast(error.message, "error");}
     finally {control.disabled = false;}
   });
 }
@@ -7304,6 +8020,7 @@ function syncOutboundLookupActions() {
 }
 async function loadOutboundProspects() {
   const generation = ++outboundGeneration;
+  document.dispatchEvent(new CustomEvent("beings-page-status", {detail:{text:"Loading…"}}));
   try {
     const data = await api(`/api/sales-engine/outbound?status=${encodeURIComponent(outboundStatus)}&search=${encodeURIComponent(state.pageSearch)}&offset=${outboundOffset}&limit=${outboundPageSize}`);
     if (generation !== outboundGeneration || state.activeView !== "prospects") return;
@@ -7329,7 +8046,7 @@ async function loadOutboundProspects() {
       </div></td>
       <td class="outbound-company"><a href="#sales" data-outbound-company="${row.candidate_id}" data-company-key="${escapeHtml(row.company_key)}">${escapeHtml(row.company_name)}</a><small>${escapeHtml(row.company_key)}</small></td>
       <td><div class="outbound-contact">
-        ${row.email ? `<div class="outbound-contact-line outbound-email-line"><span>${escapeHtml(row.email)}</span><button type="button" class="text-button" data-copy-email="${escapeHtml(row.email)}" aria-label="Copy ${escapeHtml(row.email)}">Copy</button></div>` : ""}
+        ${row.email ? `<div class="outbound-contact-line outbound-email-line"><button type="button" class="text-button" data-copy-email="${escapeHtml(row.email)}" aria-label="Copy ${escapeHtml(row.email)}">${escapeHtml(row.email)}</button></div>` : ""}
         ${/^https?:\/\//i.test(row.profile_url || "") ? `<div class="outbound-contact-line"><a href="${escapeHtml(row.profile_url)}" target="_blank" rel="noopener noreferrer">Profile ↗</a></div>` : ""}
         ${!row.email && !row.profile_url ? '<span class="muted">—</span>' : ""}
         <div class="outbound-contact-line" data-outbound-lookup="${row.id}" data-lookup-kind="ai">${lookup.ai}</div>
@@ -7348,8 +8065,12 @@ async function loadOutboundProspects() {
     $("#outbound-prev").disabled = outboundOffset === 0;
     $("#outbound-next").disabled = outboundOffset+outboundPageSize >= data.total;
     setPageSearchStatus(state.pageSearch ? `${formatNumber(data.total)} matches` : "");
+    document.dispatchEvent(new CustomEvent("beings-page-status", {detail:{text:""}}));
   } catch (error) {
-    if (generation === outboundGeneration && state.activeView === "prospects") $("#outbound-message").textContent = error.message;
+    if (generation === outboundGeneration && state.activeView === "prospects") {
+      document.dispatchEvent(new CustomEvent("beings-page-status", {detail:{text:error.message}}));
+      return;
+    }
   }
 }
 
@@ -7476,7 +8197,7 @@ async function refreshVisibleData() {
   invalidateTargetOverviewCache();
   invalidateSalesWorkbench();
   // These pages revalidate when revisited; background jobs do not fetch hidden inventories.
-  for (const view of ["sources", "intelligence", "research", "runs"]) {
+  for (const view of ["sources", "research", "runs"]) {
     if (view !== state.activeView) state.initializedViews.delete(view);
   }
   if (state.activeView === "sales") return loadSalesWorkbench({ invalidate: true });
@@ -7486,11 +8207,21 @@ async function refreshVisibleData() {
   if (state.activeView === "runs") return loadRuns();
   if (state.activeView === "spend") return loadSpend();
   if (state.activeView === "sources") return Promise.all([loadSources(), loadIntelligence()]);
-  if (state.activeView === "intelligence") return Promise.all([loadDiscoveryMethods(), loadIntelligence(), loadAdDiscoveryOverview()]);
 }
 
 async function setView(name, { preserveSearch = false } = {}) {
+  document.dispatchEvent(new CustomEvent("beings-page-status", {detail:{text:""}}));
   if (needsSalesMission() && name !== "settings") name = "sales";
+  if (name === "intelligence") {
+    await setView("smart_scan", {preserveSearch});
+    if (state.activeView !== "smart_scan") return;
+    if (window.location.hash === "#intelligence") {
+      window.history.replaceState(null, "", "#smart_scan");
+    }
+    const dialog = $("#smart-scan-options-dialog");
+    if (!dialog?.open) $("#scan-launch-trigger")?.click();
+    return;
+  }
   if (["sales", "pipeline", "accounts", "overview"].includes(name)) {
     setSalesMode(["pipeline", "accounts"].includes(name) ? "pipeline" : "prospects");
     name = "sales";
@@ -7520,12 +8251,12 @@ async function setView(name, { preserveSearch = false } = {}) {
     ++spendLoadGeneration;
     clearTimeout(spendRefreshTimer);
   }
-  if (!["intelligence", "sources"].includes(name)) {
+  if (!["smart_scan", "sources"].includes(name)) {
     setScoutActivityTicker(false);
     clearTimeout(state.scoutPollTimer);
     state.scoutPollTimer = null;
   }
-  if (name !== "intelligence") {
+  if (name !== "smart_scan") {
     clearTimeout(state.adDiscoveryPollTimer);
     state.adDiscoveryPollTimer = null;
   }
@@ -7537,14 +8268,14 @@ async function setView(name, { preserveSearch = false } = {}) {
     clearInterval(state.smartScanActionTimer);
     state.smartScanActionTimer = null;
   }
-  if (!["intelligence", "sources"].includes(name)) {
+  if (!["smart_scan", "sources"].includes(name)) {
     clearTimeout(state.discoveryPollTimer);
     state.discoveryPollTimer = null;
   }
-  const navigationView = ["sources", "intelligence"].includes(name) ? "settings" : name;
+  const navigationView = name === "sources" ? "settings" : name;
   $$(".nav-item").forEach(item => item.classList.toggle("active", item.dataset.view === navigationView));
   $$(".view").forEach(view => view.classList.toggle("active", view.id === `view-${name}`));
-  const titles = { sales: "Companies", smart_scan: "Scan", overview: "Targets", accounts: "Accounts", prospects: "Prospects", sources: "Sources", research: "Research", intelligence: "Advanced scan", runs: "Scans", settings: "Settings", spend: "Spend" };
+  const titles = { sales: "Companies", smart_scan: "Scan", overview: "Targets", accounts: "Accounts", prospects: "Prospects", sources: "Sources", research: "Research", runs: "Scans", settings: "Settings", spend: "Spend" };
   $("#page-title").textContent = titles[name] || name; window.location.hash = name === "sales" && salesMode() === "pipeline" ? "pipeline" : name;
   updatePageSearchContext();
   const firstVisit = !state.initializedViews.has(name);
@@ -7553,9 +8284,9 @@ async function setView(name, { preserveSearch = false } = {}) {
       startSmartScanElapsedTicker();
       await loadSmartScan();
     }
-    if (["intelligence", "sources"].includes(name) && activeDiscoveryRuns().length) pollDiscoveryMethodStatus();
-    if (name === "intelligence" && adDiscoveryRunActive()) pollAdDiscoveryStatus();
-    if (["intelligence", "sources"].includes(name) && state.intelligence?.scout_status?.status === "running") pollSourceScout();
+    if (["smart_scan", "sources"].includes(name) && activeDiscoveryRuns().length) pollDiscoveryMethodStatus();
+    if (name === "smart_scan" && adDiscoveryRunActive()) pollAdDiscoveryStatus();
+    if (["smart_scan", "sources"].includes(name) && state.intelligence?.scout_status?.status === "running") pollSourceScout();
     if (name === "spend") await loadSpend();
     if (name === "sales") await loadSalesWorkbench();
     if (name === "overview") await loadDashboard();
@@ -7571,11 +8302,6 @@ async function setView(name, { preserveSearch = false } = {}) {
   if (name === "prospects") { outboundShell(); await loadOutboundProspects(); }
   if (name === "sources") { sourcesShell(); await Promise.all([loadSources({ useCached: true }), loadIntelligence({ useCached: true })]); }
   if (name === "research") { researchShell(); await loadResearch(); }
-  if (name === "intelligence") {
-    intelligenceShell();
-    await Promise.all([loadDiscoveryMethods(), loadIntelligence()]);
-    void loadAdDiscoveryOverview();
-  }
   if (name === "runs") { runsShell(); await loadRuns(); }
   if (name === "settings") {
     settingsShell();
@@ -7656,15 +8382,30 @@ document.addEventListener("click", async event => {
       });
       if (findEmails.isConnected && $("#prospect-drawer").classList.contains("open")) await openProspect(id);
       showToast(result.message);
-    } catch (error) { showToast(error.message); }
+    } catch (error) { showToast(error.message, "error"); }
     finally { findEmails.disabled = false; }
     return;
   }
   const copyEmail = event.target.closest("[data-copy-email]");
   if (copyEmail) {
     event.stopPropagation();
-    await copyText(copyEmail.dataset.copyEmail);
-    showToast("Email copied");
+    event.preventDefault();
+    if (copyEmail.dataset.copyPending === "true") return;
+    copyEmail.dataset.copyPending = "true";
+    const original = copyEmail.innerHTML;
+    try {
+      await copyText(copyEmail.dataset.copyEmail);
+      copyEmail.textContent = "Copied!";
+      copyEmail.setAttribute("aria-live", "polite");
+      setTimeout(() => {
+        if (copyEmail.isConnected) copyEmail.innerHTML = original;
+        delete copyEmail.dataset.copyPending;
+      }, 1600);
+    } catch (error) {
+      delete copyEmail.dataset.copyPending;
+      showToast("Could not copy email. Please try again.", "error");
+    }
+    return;
   }
   const row = event.target.closest("[data-prospect-id]");
   if (row && !event.target.closest("[data-star], [data-exclude], .quick-open, .contact-action")) openProspect(Number(row.dataset.prospectId));
@@ -7686,7 +8427,7 @@ document.addEventListener("click", async event => {
       await refreshVisibleData();
     } catch (error) {
       exclusion.disabled = false;
-      showToast(error.message);
+      showToast(error.message, "error");
     }
   }
   const toggle = event.target.closest("[data-source-toggle]");
@@ -7710,7 +8451,7 @@ document.addEventListener("click", async event => {
   if (openMethodTab) {
     const tabId = openMethodTab.dataset.openMethodTab;
     state.discoveryTab = tabId;
-    if (state.activeView !== "intelligence") await setView("intelligence");
+    await setView("intelligence");
     selectDiscoveryTab(tabId, { focus: true });
   }
   const hydrateSource = event.target.closest("[data-hydrate-source]");
@@ -7733,7 +8474,7 @@ document.addEventListener("click", async event => {
       }
     } catch (error) {
       hydrateSource.disabled = false;
-      showToast(error.message);
+      showToast(error.message, "error");
     }
   }
   const dismissSource = event.target.closest("[data-dismiss-source]");
@@ -7756,7 +8497,7 @@ document.addEventListener("click", async event => {
       state.pendingSourceDismissals.delete(sourceId);
       renderDiscoverySourceInventory();
       renderAcceptedSourceInventory();
-      showToast(error.message);
+      showToast(error.message, "error");
     }
   }
   const suggestionAction = event.target.closest("[data-suggestion-action]");
@@ -7786,17 +8527,17 @@ document.addEventListener("click", async event => {
       if(payload.status === "accepted") {
         if(!applySourceReview(payload,suggestion))await loadIntelligence();
         if(payload.source?.source_kind === "tenant_apex")await loadSources();
-        if(state.activeView === "intelligence")await loadDiscoveryMethods();
+        if(state.activeView === "smart_scan")await loadDiscoveryMethods();
       } else {
         await Promise.all([loadIntelligence(), loadSources(), loadDiscoveryMethods()]);
       }
       if (suggestionAction.dataset.suggestionAction === "accepted" && ACTIVE_RUN_STATES.has(activationState)) pollDiscoveryMethodStatus();
     } catch (error) {
       suggestionAction.disabled = false;
-      showToast(error.message);
+      showToast(error.message, "error");
       // A failed mutation leaves the current view intact; revalidate only visible source data.
       if(state.activeView === "sources")void loadSources();
-      if(state.activeView === "intelligence")void loadIntelligence();
+      if(state.activeView === "smart_scan")void loadIntelligence();
     }
   }
   const adLinkAction = event.target.closest("[data-ad-link-action]");
@@ -7821,7 +8562,7 @@ document.addEventListener("click", async event => {
       pollScanStatus();
     } catch (error) {
       resume.disabled = false;
-      showToast(error.message);
+      showToast(error.message, "error");
     }
   }
   const deleteClaim = event.target.closest("[data-delete-claim]");
@@ -7832,7 +8573,7 @@ document.addEventListener("click", async event => {
       showToast("Evidence claim deleted");
       renderAccountWorkspace(refreshed);
       await refreshAccountViews();
-    } catch (error) { deleteClaim.disabled = false; showToast(error.message); }
+    } catch (error) { deleteClaim.disabled = false; showToast(error.message, "error"); }
   }
   const verifyClaim = event.target.closest("[data-verify-claim]");
   if (verifyClaim && state.activeAccount) {
@@ -7844,7 +8585,7 @@ document.addEventListener("click", async event => {
         showToast("Evidence claim verified");
         renderAccountWorkspace(refreshed);
         await refreshAccountViews();
-      } catch (error) { verifyClaim.disabled = false; showToast(error.message); }
+      } catch (error) { verifyClaim.disabled = false; showToast(error.message, "error"); }
     }
   }
 });
@@ -7856,7 +8597,7 @@ $("#source-form").addEventListener("submit", async event => {
   try {
     await api("/api/sources", { method: "POST", body: JSON.stringify({ apex: form.get("apex"), category: form.get("category"), notes: form.get("notes") || "Added from dashboard" }) });
     $("#source-modal").close(); event.currentTarget.reset(); showToast("Source added"); await loadSources();
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
 });
 $("#new-account-segment").addEventListener("change", event => {
   if (event.target.value === "agency_buyer") $("#new-account-relationship").value = "buyer";
@@ -7875,7 +8616,7 @@ $("#account-form").addEventListener("submit", async event => {
     showToast(payload.created === false ? "Existing company opened" : "Company added to pipeline");
     await refreshAccountViews();
     if (account?.id) await openAccount(account.id);
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
 });
 
 async function readAccountImport() {
@@ -7901,7 +8642,7 @@ $("#preview-account-import").addEventListener("click", async () => {
     const result = await api("/api/accounts/import.csv?dry_run=true", { method: "POST", headers: { "Content-Type": "text/csv" }, body: csv });
     renderImportResult(result);
     showToast("CSV validation complete");
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
 });
 $("#account-import-form").elements.file.addEventListener("change", () => {
   state.accountImportText = "";
@@ -7917,7 +8658,7 @@ $("#account-import-form").addEventListener("submit", async event => {
     $("#account-import-modal").close(); event.currentTarget.reset(); state.accountImportText = ""; $("#commit-account-import").disabled = true;
     showToast(`${formatNumber(result.created || 0)} accounts imported`);
     await refreshAccountViews();
-  } catch (error) { showToast(error.message); }
+  } catch (error) { showToast(error.message, "error"); }
 });
 
 let pageSearchDebounce;
@@ -7981,15 +8722,23 @@ function consumeRefreshState() {
   }
 }
 
-$("#refresh-app").addEventListener("click", () => {
+function saveRefreshLocation() {
   try {
+    const view = document.querySelector(`#view-${state.activeView}`);
     sessionStorage.setItem(REFRESH_STATE_KEY, JSON.stringify({
       activeView: state.activeView === "sales" && salesMode() === "pipeline" ? "pipeline" : state.activeView,
       discoveryTab: state.discoveryTab,
+      pageSearch: state.pageSearch,
+      viewScroll: view?.scrollTop || 0,
+      sales: captureSalesLocation(),
     }));
   } catch {
     // The URL hash still preserves the primary tab when session storage is unavailable.
   }
+}
+window.addEventListener("pagehide", saveRefreshLocation);
+$("#refresh-app").addEventListener("click", () => {
+  saveRefreshLocation();
   window.location.reload();
 });
 
@@ -8022,13 +8771,23 @@ window.addEventListener("hashchange", () => {
 
 async function bootstrap() {
   if (document.documentElement.hasAttribute("data-require-user-mission")) {
-    await loadSalesMissions().catch(error => showToast(error.message));
+    await loadSalesMissions().catch(error => showToast(error.message, "error"));
   }
   const restored = consumeRefreshState();
-  if (restored?.discoveryTab && DISCOVERY_TAB_DEFINITIONS.some(tab => tab.id === restored.discoveryTab)) state.discoveryTab = restored.discoveryTab;
+  if (restored?.discoveryTab && (
+    DISCOVERY_TAB_DEFINITIONS.some(tab => tab.id === restored.discoveryTab)
+    || SCAN_SECTION_LINKS.some(([id]) => id === restored.discoveryTab)
+  )) state.discoveryTab = restored.discoveryTab;
+  const salesRestored = restoreSalesLocation(restored?.sales);
+  if (typeof restored?.pageSearch === "string") state.pageSearch = restored.pageSearch;
   const initial = restored?.activeView || window.location.hash.slice(1) || "sales";
   const supported = ["sales", "pipeline", "accounts", "smart_scan", "overview", "prospects", "sources", "intelligence", "settings", "spend"];
-  await setView(supported.includes(initial) ? initial : "sales");
+  await setView(supported.includes(initial) ? initial : "sales", {preserveSearch:Boolean(restored)});
+  if (restored) {
+    if (salesRestored && state.activeView === "sales") restoreSalesScroll(restored.sales);
+    const view = document.querySelector(`#view-${state.activeView}`);
+    if (view && Number.isFinite(restored.viewScroll) && restored.viewScroll >= 0) view.scrollTop = restored.viewScroll;
+  }
   if (state.activeView !== "settings") void loadScanReadiness({checkTregHealth:false});
   // The visible company list/summary wins the initial request budget. This tiny status
   // powers the global progress strip; research and other inventories load on demand.
@@ -8057,7 +8816,7 @@ terminologyObserver.observe(document.body, { childList: true, subtree: true, cha
 
 bootstrap();
 if (!document.documentElement.hasAttribute("data-require-user-mission")) {
-  void loadSalesMissions().catch(error => showToast(error.message));
+  void loadSalesMissions().catch(error => showToast(error.message, "error"));
 }
 
 const interfaceThemeButton = document.getElementById("interface-theme");
