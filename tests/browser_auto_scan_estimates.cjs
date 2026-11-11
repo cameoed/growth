@@ -15,6 +15,8 @@ const pendingLaunch = new Promise(resolve => { rejectLaunch = resolve; });
 (async () => {
   let portfolioDue = false;
   let smartControlSnapshot = null;
+  let smartStatusGate = null;
+  let scanOverview = null;
   const browser = await chromium.launch({channel:'chrome', headless:true});
   try {
     const page = await browser.newPage({viewport:{width:1440,height:1000}});
@@ -42,13 +44,19 @@ const pendingLaunch = new Promise(resolve => { rejectLaunch = resolve; });
             await pendingLaunch;
             return route.fulfill({status:409,json:{detail:'Fixture rejected the launch'}});
           }
+          if (smartStatusGate) await smartStatusGate;
           json = smartControlSnapshot || smart; break;
+        case '/api/scan-status':
+          json = {status:'idle',scan_overview:scanOverview}; break;
         case '/api/smart-scan/pause':
         case '/api/smart-scan/resume': {
           const status = url.pathname.endsWith('/pause') ? 'paused' : 'running';
           smartControlSnapshot = {...smart,id:'activity-fixture',status,control_status:status};
           json = smartControlSnapshot; break;
         }
+        case '/api/smart-scan/clear':
+          smartControlSnapshot = smart;
+          json = smart; break;
         case '/api/smart-scan/inventory':
           json = smart; break;
         case '/api/web-scan/estimates':
@@ -85,7 +93,15 @@ const pendingLaunch = new Promise(resolve => { rejectLaunch = resolve; });
       }
       return route.fulfill({json});
     });
+    let releaseStatus;
+    smartStatusGate = new Promise(resolve => { releaseStatus = resolve; });
     await page.goto('http://scan-estimates.test/#smart_scan');
+    const launcher = page.locator('#scan-launch-trigger');
+    await page.getByRole('button',{name:'Checking scan status…',exact:true}).waitFor();
+    assert.equal(await page.locator('.scan-shortcuts').isVisible(),false);
+    assert.equal(await launcher.isDisabled(),true);
+    releaseStatus();
+    smartStatusGate = null;
     const nextPost = (pathname, predicate = () => true) => page.waitForRequest(req =>
       req.method() === 'POST' && new URL(req.url()).pathname === pathname && predicate(req.postDataJSON()));
     const firstEstimate = nextPost('/api/web-scan/estimates');
@@ -235,9 +251,17 @@ const pendingLaunch = new Promise(resolve => { rejectLaunch = resolve; });
     await toggle.click();
     await resume;
     await page.getByRole('button',{name:'Pause',exact:true}).waitFor();
-    smartControlSnapshot = null;
-    await page.evaluate(snapshot => window.renderTestScan(snapshot), smart);
+    smartControlSnapshot = {...smart,id:'activity-fixture',status:'complete',control_status:'complete'};
+    await page.evaluate(snapshot => window.renderTestScan(snapshot), smartControlSnapshot);
+    const clear = nextPost('/api/smart-scan/clear');
+    const clearButton = page.locator('#clear-smart-scan');
+    await clearButton.click();
+    await clear;
+    await clearButton.waitFor({state:'hidden'});
     await page.locator('[data-view=settings]').click();
+    const license = page.getByRole('link', {name:'Product Use License'});
+    assert.ok(await license.isVisible());
+    assert.equal(await license.getAttribute('href'), 'https://github.com/cameoed/growth/blob/main/LICENSE');
     await page.locator('#open-treg-settings').click();
     await page.locator('#buyer-intelligence-form [name=company_limit]').fill('12');
     await page.locator('#buyer-intelligence-status button').waitFor();
@@ -255,6 +279,25 @@ const pendingLaunch = new Promise(resolve => { rejectLaunch = resolve; });
     assert.deepEqual((await launch).postDataJSON(), {
       quote_id:'ad-quote',confirmed:true,confirmed_max_usd:5,
     });
+    smartControlSnapshot = {...smart,id:'startup-fixture',status:'paused',control_status:'paused'};
+    scanOverview = {smart:smartControlSnapshot};
+    smartStatusGate = new Promise(resolve => { releaseStatus = resolve; });
+    await page.reload();
+    await page.getByRole('button',{name:'Smart Scan paused',exact:true}).waitFor();
+    const startupResume = page.getByRole('button',{name:'Resume',exact:true});
+    assert.equal(await startupResume.isVisible(),true);
+    assert.equal(await startupResume.isDisabled(),true);
+    assert.equal(await page.locator('.scan-shortcuts').isVisible(),false);
+    releaseStatus();
+    smartStatusGate = null;
+    await page.waitForFunction(() => !document.querySelector('#pause-resume-smart-scan').disabled);
+    assert.equal(await page.locator('.scan-shortcuts').isVisible(),false);
+
+    smartControlSnapshot = smart;
+    scanOverview = {smart,methods:[{id:'directory-fixture',status:'running',method_label:'Directories'}]};
+    await page.reload();
+    await page.getByRole('button',{name:'Directories is running…',exact:true}).waitFor();
+    assert.equal(await page.locator('.scan-shortcuts').isVisible(),false);
     assert.deepEqual(errors,[]);
     console.log('Automatic quotes, stale draft rejection, cap approval reset, and explicit launch gating passed');
   } finally {

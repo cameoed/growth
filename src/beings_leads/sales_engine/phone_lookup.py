@@ -145,7 +145,7 @@ def _parse_candidates(payload, provider):
     data = payload.get("data", payload)
     if provider == "tomba":
         if not isinstance(data, dict):
-            return set() if data is None else None
+            return set() if data is None or data == [] else None
         phone = _dial(data.get("e164_format"))
         return {phone} if phone and phone.startswith("+") and data.get("valid") else set()
     if not isinstance(data, dict) or not isinstance(data.get("found"), bool):
@@ -258,17 +258,26 @@ async def find_phone(repo, packet, key, legacy_cap=None, *, manual_retry=False):
     spent = 0
     age_limit = timedelta(days=FRESH_DAYS) if complete else RETRY_DELAY
     fresh = bool(cached and datetime.fromisoformat(cached["observed_at"]) > now - age_limit)
-    retry_used = fresh and cached_data.get("manual_retry", False)
-    retry_available = (
-        fresh and not retry_used and not cached_data.get("phone")
+    cached_manual = cached_data.get("manual_retry", False)
+    retryable_manual = (
+        cached_manual and not complete
+        and bool(cached_data.get("attempts"))
+        and all(attempt.get("cost_microusd") == 0 for attempt in cached_data["attempts"])
+    )
+    retry_used = fresh and cached_manual and not retryable_manual
+    retry_available = retryable_manual or (
+        fresh and not cached_manual and not cached_data.get("phone")
         and {attempt["provider"] for attempt in cached_data.get("attempts", [])}
         == {provider[0] for provider in PROVIDERS}
     )
     if manual_retry and not (retry_available or retry_used):
         raise ValueError("Run Find phone before trying Tomba")
-    reused = bool(fresh and (
-        retry_used or cached_data.get("phone") or (not manual_retry and not expanded)
-    ))
+    reused = bool(
+        (retryable_manual and (fresh or not manual_retry))
+        or (fresh and (retry_used or cached_data.get("phone") or (
+            not manual_retry and not expanded
+        )))
+    )
     if reused:
         phone = cached_data["phone"]
         stamp = cached["observed_at"]
@@ -291,8 +300,11 @@ async def find_phone(repo, packet, key, legacy_cap=None, *, manual_retry=False):
                 client, packet, person, profile, credentials, reservation, legacy_cap, manual_retry,
             )
         repo.settle_budget(reservation, spent)
-        retry_used = manual_retry
-        retry_available = not manual_retry and not phone and len(attempts) == len(PROVIDERS)
+        retryable_manual = manual_retry and not complete and spent == 0
+        retry_used = manual_retry and not retryable_manual
+        retry_available = retryable_manual or (
+            not manual_retry and not phone and len(attempts) == len(PROVIDERS)
+        )
         stamp = datetime.now(UTC).isoformat()
         repo.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -317,7 +329,7 @@ async def find_phone(repo, packet, key, legacy_cap=None, *, manual_retry=False):
                                           observed_at=stamp, expected_identity=identity)
                if phone else None)
     found = bool(contact and phone and contact["phone"] == phone["value"])
-    if not complete and not retry_available:
-        raise ValueError("Phone lookup could not complete. Try again in a few minutes.")
+    retry_at = datetime.fromisoformat(stamp) + RETRY_DELAY if retryable_manual else None
     return {"contact": contact, "found": found, "cached": reused, "cost_microusd": spent,
-            "retry_available": retry_available, "retry_used": retry_used}
+            "complete": complete, "retry_available": retry_available, "retry_used": retry_used,
+            "retry_at": retry_at.isoformat() if retry_at and retry_at > now else None}

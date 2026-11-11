@@ -673,21 +673,24 @@ class TregPeopleClient:
         titles: Sequence[str],
         limit: int,
         idempotency_key: str,
+        name: tuple[str, str] | None = None,
     ) -> TregSearchResult:
         normalized_domain = _normalized_domain(domain)
         bounded = max(1, min(int(limit), MAX_PEOPLE_LIMIT))
         normalized_titles = list(
             dict.fromkeys(_text(title, 160) for title in titles if _text(title, 160))
         )
-        if not normalized_domain or not normalized_titles:
-            raise ValueError("People search requires a domain and at least one title")
+        if not normalized_domain or not (normalized_titles or name):
+            raise ValueError("People search requires a domain and a name or title")
+        query = {"currentCompanyWebsite": {"include": [normalized_domain]}}
+        if normalized_titles:
+            query["currentJobTitle"] = {"include": normalized_titles}
+        if name:
+            query.update(firstname={"include": [name[0]]}, lastname={"include": [name[1]]})
         payload, raw, headers = await self._post(
             PEOPLE_SEARCH_ENDPOINT,
             {
-                "query": {
-                    "currentCompanyWebsite": {"include": [normalized_domain]},
-                    "currentJobTitle": {"include": normalized_titles},
-                },
+                "query": query,
                 "pagination": {"size": bounded},
             },
             extra_headers={
@@ -710,7 +713,7 @@ class TregPeopleClient:
         self,
         *,
         domain: str,
-        person: HydratedPerson,
+        person: ProviderPerson | HydratedPerson,
         max_cost_usd: Decimal = DEFAULT_EMAIL_MAX_COST_USD,
         idempotency_key: str,
     ) -> TregEmailResult:

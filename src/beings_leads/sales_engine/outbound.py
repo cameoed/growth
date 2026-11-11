@@ -168,9 +168,10 @@ def _item(row, connection):
     result["ai_contact"] = contact.get("ai_contact", {})
     result["phone"] = _effective_phone(contact)
     result["public_work_phone"] = contact.get("public_work_phone")
-    result["phone_lookup_blocked"] = (
-        "phone" in contact.get("operator_updates", {}) and not result["phone"]
-    )
+    result["provider_contact"] = contact.get("provider_contact", {})
+    operator_updates = contact.get("operator_updates", {})
+    for field in ("email", "profile_url", "phone"):
+        result[f"{field}_lookup_blocked"] = field in operator_updates and not result[field]
     result["operator_supplied"] = (
         contact.get("source_kind") == "operator_supplied" or bool(contact.get("operator_created"))
     )
@@ -271,20 +272,20 @@ def save(connection, packet, key, *, _operator=False):
             )
         else:
             pid = row["id"]
+            previous = json.loads(row["contact_json"])
             # Operator entries fill gaps without replacing saved source evidence.
             if _operator:
-                original = json.loads(row["contact_json"])
-                operator = original.get("operator_contact") or (
-                    dict(original) if original.get("source_kind") == "operator_supplied" else {}
+                snapshot = dict(previous)
+                operator = previous.get("operator_contact") or (
+                    dict(previous) if previous.get("source_kind") == "operator_supplied" else {}
                 )
                 operator.update({field: value for field, value in person.items()
                                  if value not in (None, "") and not (
                                      field == "name" and value == person.get("email")
                                      and operator.get("name"))})
-                original["operator_contact"] = operator
-                contact_json = json.dumps(original)
+                snapshot["operator_contact"] = operator
                 route_name = row["name"].casefold() in {
-                    (row["email"] or "").casefold(), _effective_phone(original) or "",
+                    (row["email"] or "").casefold(), _effective_phone(previous) or "",
                 }
                 person = {
                     **person,
@@ -294,7 +295,6 @@ def save(connection, packet, key, *, _operator=False):
                     "profile_url": row["profile_url"] or person.get("profile_url"),
                 }
             else:
-                previous = json.loads(row["contact_json"])
                 snapshot = dict(person)
                 operator_created = (previous.get("source_kind") == "operator_supplied"
                                     or previous.get("operator_created"))
@@ -303,24 +303,16 @@ def save(connection, packet, key, *, _operator=False):
                     snapshot["operator_created"] = bool(operator_created)
                     person = {**person, "title": person.get("title") or row["title"],
                               "email": person.get("email") or row["email"]}
-                contact_json = json.dumps(snapshot)
-            previous_contact = json.loads(row["contact_json"])
-            if previous_contact.get("ai_contact"):
-                snapshot = json.loads(contact_json)
-                snapshot["ai_contact"] = previous_contact["ai_contact"]
-                contact_json = json.dumps(snapshot)
+            for field in ("ai_contact", "public_work_phone", "provider_contact"):
+                if previous.get(field):
+                    snapshot[field] = previous[field]
+            if previous.get("ai_contact") or previous.get("provider_contact"):
                 person = {**person, "email": person.get("email") or row["email"]}
-            if previous_contact.get("public_work_phone"):
-                snapshot = json.loads(contact_json)
-                snapshot["public_work_phone"] = previous_contact["public_work_phone"]
-                contact_json = json.dumps(snapshot)
-            if "operator_updates" in previous_contact:
-                updated_contact = json.loads(contact_json)
+            if "operator_updates" in previous:
                 for field in ("operator_updates", "operator_edit_history"):
-                    if field in previous_contact:
-                        updated_contact[field] = previous_contact[field]
-                contact_json = json.dumps(updated_contact)
-                person = {**person, **previous_contact["operator_updates"]}
+                    if field in previous:
+                        snapshot[field] = previous[field]
+                person = {**person, **previous["operator_updates"]}
             # Saving again refreshes evidence, retaining status, notes and original creation.
             connection.execute(
                 """UPDATE outbound_people SET candidate_id=?,person_key=?,
@@ -334,10 +326,10 @@ def save(connection, packet, key, *, _operator=False):
                     identity_text(person["name"]),
                     person.get("title") or "",
                     person.get("email"),
-                    person.get("profile_url") if "operator_updates" in previous_contact else
+                    person.get("profile_url") if "operator_updates" in previous else
                     person.get("profile_url") or row["profile_url"],
                     packet.get("company_name") or company,
-                    contact_json,
+                    json.dumps(snapshot),
                     pid,
                 ),
             )
@@ -385,34 +377,46 @@ def fill_contact_gaps(connection, packet, key, contacts, *, observed_at, model=N
         evidence = original.setdefault("ai_contact", {})
         updates = original.get("operator_updates", {})
         email = row["email"]
+        profile_url = row["profile_url"]
         changed = False
         for field, value in contacts.items():
             if (not value or field in updates
                     or (field == "email" and (email or person.get("email")))
+                    or (field == "profile_url" and (profile_url or person.get("profile_url")))
                     or (field == "phone" and (_effective_phone(original) or person.get("phone")))):
                 continue
+            if field in {"email", "profile_url"}:
+                duplicate = connection.execute(
+                    f"SELECT 1 FROM outbound_people WHERE company_key=? AND id<>? "
+                    f"AND rtrim(lower({field}), '/')=rtrim(lower(?), '/')",
+                    (company, pid, value["value"]),
+                ).fetchone()
+                if duplicate:
+                    continue
             if field == "phone" and model is None:
                 original["public_work_phone"] = {
                     **value, "observed_at": observed_at,
                     "source_kind": value.get("source_kind", "public_first_party"),
                 }
+            elif value.get("source_kind") in {
+                "licensed_professional_provider", "public_web_search",
+            }:
+                original.setdefault("provider_contact", {})[field] = {
+                    **value, "observed_at": observed_at,
+                }
             else:
                 evidence[field] = {**value, "observed_at": observed_at, "model": model,
                                    "source_kind": "ai_public_web_search"}
             if field == "email":
-                conflict = connection.execute(
-                    "SELECT 1 FROM outbound_people WHERE company_key=? AND id<>? "
-                    "AND email=? COLLATE NOCASE", (company, pid, value["value"]),
-                ).fetchone()
-                if conflict:
-                    evidence.pop(field)
-                    continue
                 email = value["value"]
+            if field == "profile_url":
+                profile_url = value["value"]
             changed = True
         if changed:
             connection.execute(
-                "UPDATE outbound_people SET email=?,contact_json=?,updated_at=? WHERE id=?",
-                (email, json.dumps(original), _stamp(), pid),
+                "UPDATE outbound_people SET email=?,profile_url=?,contact_json=?,updated_at=? "
+                "WHERE id=?",
+                (email, profile_url, json.dumps(original), _stamp(), pid),
             )
         result = _item(connection.execute(
             "SELECT * FROM outbound_people WHERE id=?", (pid,)).fetchone(), connection)

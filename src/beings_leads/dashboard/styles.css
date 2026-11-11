@@ -77,21 +77,24 @@ button { color: inherit; }
   gap: 6px; max-inline-size: 100%; vertical-align: middle;
 }
 .loading-spinner,
-[data-estimate-pending="true"]::before {
+[data-estimate-pending="true"]::before,
+#engine-contacts [data-lookup-label][aria-busy="true"]::before {
   display: block; flex: none; box-sizing: border-box;
   inline-size: clamp(10px, .875em, 14px); aspect-ratio: 1;
   border: 1.5px solid currentColor; border-right-color: transparent;
   border-radius: 50%; opacity: .7;
   animation: loading-spin .8s linear infinite;
 }
-[data-estimate-pending="true"]::before {
+[data-estimate-pending="true"]::before,
+#engine-contacts [data-lookup-label][aria-busy="true"]::before {
   content: ""; display: inline-block;
   margin-inline-end: 6px; vertical-align: -.1em;
 }
 .loading-indicator[hidden], .loading-spinner[hidden] { display: none !important; }
 @keyframes loading-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
-  .loading-spinner, [data-estimate-pending="true"]::before { animation: none; }
+  .loading-spinner, [data-estimate-pending="true"]::before,
+  #engine-contacts [data-lookup-label][aria-busy="true"]::before { animation: none; }
 }
 
 .app-shell { min-height: 100vh; display: grid; grid-template-columns: 210px 1fr; }
@@ -1632,6 +1635,7 @@ html, body { background: var(--paper); }
 .smart-scan-options-dialog .modal-head p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
 .smart-scan-options-dialog .scan-setup-body { min-height: 0; max-height: none; padding: 20px 24px 24px; overflow-y: auto; }
 .smart-scan-head > [hidden], .smart-scan-options-dialog [hidden] { display: none !important; }
+.smart-scan-shell[data-launch-status-pending="true"] :is(.smart-scan-choice-divider, .scan-shortcuts),
 #scan-launch-trigger[data-running="true"] ~ :is(.smart-scan-choice-divider, .scan-shortcuts) { display: none; }
 .scan-setup-availability { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
 .scan-launch-lock { grid-column: 1 / -1; margin: 2px 0 0; color: var(--muted); font-size: 12px; }
@@ -2550,11 +2554,14 @@ textarea:focus-visible {
 }
 .engine-email-control { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
 .engine-company-list { max-height: max(220px, calc(100vh - 365px)); }
-.engine-list-tools { padding: 14px 18px; border-top: 1px solid var(--line); font-size: 12px; }
-.engine-list-tools > summary, .engine-tools summary { cursor: pointer; color: var(--muted); }
-.engine-list-tools > .button { margin: 12px 4px 0 0; padding: 7px 10px; font-size: 12px; }
-.engine-list-tools .engine-search { display: grid; padding: 16px 0 0; }
-.engine-list-tools > details { margin-top: 16px; }
+.engine-company-list:has(> .engine-scan-more) { display: flex; flex-direction: column; }
+.engine-company-list:has(> .engine-scan-more) > .engine-company { flex-shrink: 0; }
+.engine-scan-more { flex: 1 0 auto; display: grid; place-items: center; padding: 24px 16px; }
+.engine-tools summary { cursor: pointer; color: var(--muted); }
+.engine-list-research {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 6px var(--list-gutter); border-top: var(--pane-border);
+}
 .engine-pagination, .outbound-paging {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
   gap: 8px; padding: 10px var(--list-gutter); border-top: var(--pane-border);
@@ -2563,10 +2570,33 @@ textarea:focus-visible {
 :is(.engine-pagination, .outbound-paging) .button {
   min-height: var(--compact-control-height); padding: 5px 10px; font-size: 12px;
 }
-.engine-page-size, .engine-page-number, .engine-page-navigation { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
-.engine-page-navigation { margin-left: auto; }
-.engine-pagination select, .engine-pagination input { width: auto; min-height: var(--compact-control-height); border: var(--pane-border); border-radius: var(--control-radius); padding: 5px 8px; background: var(--surface); color: var(--ink); font: inherit; line-height: 20px; }
-.engine-pagination input { width: 55px; text-align: center; }
+.engine-pagination {
+  display: grid; grid-template-columns: 1fr auto 1fr;
+  gap: 6px; padding: 6px var(--list-gutter);
+}
+.engine-page-size, .engine-page-number, .engine-page-navigation, .engine-page-actions {
+  display: flex; align-items: center; gap: 5px; white-space: nowrap;
+}
+.engine-page-size { justify-self: start; margin: 0; }
+.engine-page-number { margin: 0; }
+.engine-page-navigation { justify-self: end; }
+.engine-pagination .button, .engine-list-research .button {
+  min-height: 30px; padding: 3px 8px; font-size: 12px;
+}
+.engine-page-navigation .button { min-width: 30px; font-size: 18px; line-height: 1; }
+.engine-pagination select, .engine-pagination input {
+  width: auto; min-height: 30px; border: var(--pane-border); border-radius: var(--control-radius);
+  padding: 3px 6px; background: var(--surface); color: var(--ink); font: inherit;
+}
+.engine-pagination input { width: 7ch; text-align: center; appearance: textfield; }
+.engine-pagination input::-webkit-inner-spin-button { appearance: none; }
+@container company-list (max-width: 420px) {
+  .engine-pagination { grid-template-columns: minmax(0, 1fr) auto; }
+  .engine-page-actions { grid-column: 1 / -1; grid-row: 1; justify-self: center; }
+}
+@container company-list (max-width: 300px) {
+  .engine-page-size > [aria-hidden] { display: none; }
+}
 .engine-card.engine-lead { margin-bottom: 12px; padding: 12px 16px; overflow: visible; }
 .engine-company-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 8px; padding-top: 8px; border-top: var(--pane-border); }
 .engine-company-controls .engine-company-tags { margin: 0; }
@@ -3070,10 +3100,11 @@ a.scan-overview-item, a.scan-overview-item:hover { color: inherit; text-decorati
 .outbound-company { min-width: 160px; }
 .outbound-row:focus-within { background: var(--surface-muted); }
 .outbound-table small { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
-.outbound-person, .outbound-contact-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
-.outbound-identity { min-width: 0; }
+.outbound-person, .outbound-contact-line { display: flex; align-items: center; gap: 4px 8px; }
+.outbound-contact-line { flex-wrap: wrap; }
+.outbound-identity { flex: 1; min-width: 0; }
 .outbound-identity, .outbound-company, .outbound-contact { overflow-wrap: anywhere; }
-.outbound-person-actions { display: inline-flex; align-items: center; gap: 3px; }
+.outbound-person-actions { display: inline-flex; flex: none; align-items: center; gap: 3px; white-space: nowrap; }
 .outbound-row :is(.text-button, .outbound-note) { min-height: 28px; padding: 3px 6px; font-size: 12px; font-weight: 550; }
 .outbound-row .outbound-note { display: inline-grid; place-items: center; min-width: 28px; }
 .outbound-row .outbound-note.has-note { color: var(--moss); }
@@ -4018,8 +4049,8 @@ input, textarea, [contenteditable="true"],
 /* Named company contacts use aligned columns with local horizontal scrolling. */
 .engine-contacts-table-wrap { min-width: 0; max-width: 100%; overflow-x: auto; margin-block: 8px 12px; }
 .engine-contacts-table { width: 100%; min-width: 760px; table-layout: fixed; border-collapse: collapse; }
-.engine-contacts-table col:nth-child(1) { width: 24%; }
-.engine-contacts-table col:nth-child(2) { width: 12%; }
+.engine-contacts-table col:nth-child(1) { width: 23%; }
+.engine-contacts-table col:nth-child(2) { width: 13%; }
 .engine-contacts-table col:nth-child(3) { width: 25%; }
 .engine-contacts-table col:nth-child(4) { width: 21%; }
 .engine-contacts-table col:nth-child(5) { width: 18%; }
@@ -4043,12 +4074,19 @@ input, textarea, [contenteditable="true"],
 .engine-contacts-table .engine-contact-email { display: flex; align-items: start; flex-wrap: wrap; gap: 2px 6px; }
 .engine-contacts-table .engine-email { min-width: 0; max-width: 100%; }
 .engine-contacts-table :is(td:nth-child(2), .engine-contact-phone) > a { white-space: nowrap; }
+.engine-contacts-table :is(th, td):nth-child(2) { padding-inline: 10px; }
 .engine-contacts-table :is(th, td):last-child { padding-inline-start: 8px; }
 .engine-contacts-table .engine-contact-actions { gap: 6px; }
+.engine-lookup-exhausted { display: inline-flex; cursor: not-allowed; }
+.engine-lookup-exhausted > button { pointer-events: none; }
 .engine-contacts-table .engine-contact-actions .button,
-.engine-contacts-table .engine-contact-phone .button {
+.engine-contacts-table :is(td:nth-child(2), .engine-contact-email, .engine-contact-phone) .button {
   padding: 6px 9px; min-height: 32px; font-size: 11px; max-width: 100%;
   white-space: normal; overflow-wrap: anywhere;
+}
+.engine-contacts-table td:nth-child(2) .button {
+  padding-inline: 5px;
+  white-space: nowrap;
 }
 .engine-contacts-table th:last-child { text-align: right; }
 

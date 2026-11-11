@@ -12,7 +12,7 @@ const context = vm.createContext({
   state:{activeView:'smart_scan'}, standaloneScanFocus:null,
   ACTIVE_RUN_STATES:new Set(['running','queued','starting']),
   smartScanActive:run=>['running','starting'].includes(run.status),scanOverviewItems:()=>rows,
-  renderStandaloneScanWorkspace:()=>{},$:selector=>selector==='#scan-overview'?overview:null,
+  renderStandaloneScanWorkspace:()=>{},renderScanLauncherStatus:()=>{},$:selector=>selector==='#scan-overview'?overview:null,
   smartScanProgress:()=>12.5,discoveryProgressPercent:run=>run.progress_percent ?? null,
   formatNumber:String,humanize:s=>s==='failed'?'Failed':s,
   escapeHtml:String,firstValue:(obj,paths,fallback)=>{

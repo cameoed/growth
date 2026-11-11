@@ -35,4 +35,26 @@ find it next time. Leave storage and mission choices for me in the app. Ask
 before configuring paid providers or running scans.
 ```
 
+## Run from a checkout
+
+With Git and Python 3.11 or newer installed, clone the repository and run:
+
+```sh
+git clone https://github.com/cameoed/growth.git
+cd growth
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+.venv/bin/beings-growth
+```
+
+On Windows, use `py -3 -m venv .venv` and run
+`.venv\Scripts\python.exe -m pip install -e .` followed by
+`.venv\Scripts\beings-growth.exe`. Set `PYTHONUTF8=1` for the launch.
+
+For a provider-free check, run `.venv/bin/python scripts/smoke_dashboard.py`.
+It starts the dashboard with temporary SQLite data and exercises local onboarding,
+saved contacts, scan admission and the desktop ranking worker.
+
+Beings Growth is source-available under the Product Use License.
+
 [Growth tactics](docs/GROWTH_TACTICS.md) · [Oracle VM setup](deploy/oracle/README.md) · [Product Use License](LICENSE)

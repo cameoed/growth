@@ -21,7 +21,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from fastapi.responses import JSONResponse, Response
 from pydantic import ConfigDict, Field, model_validator
 
-from ..email_lookup import company_email_estimate, find_company_emails
+from ..email_lookup import PEOPLE_MAXIMUM_MICROUSD, company_email_estimate, find_company_emails
 from ..local_access import require_local
 from ..microlink_contacts_scan import (
     REQUESTS_PER_COMPANY,
@@ -89,7 +89,8 @@ class WatchRequest(EngineModel):
 
 
 class EmailLookupRequest(EngineModel):
-    confirmed_maximum_microusd: Literal[0, 50000, 53040]
+    confirmed_maximum_microusd: Literal[0, 3040, 50000, 53040]
+    source_only: bool = False
     confirmed_microlink_requests: int = Field(default=0, ge=0, le=REQUESTS_PER_COMPANY)
 
 
@@ -172,6 +173,19 @@ class TagRescore(EngineModel):
 class CompanyTagChange(EngineModel):
     tag: str = Field(min_length=1, max_length=40)
     action: Literal["add", "remove"]
+
+
+def _contact_summary(store, candidate_id, mission_id):
+    engine = SimpleNamespace(store=store, connection=store.connection)
+    if mission_id == "beings":
+        from .summaries import company_summary
+
+        packet, _ = company_summary(engine, candidate_id)
+        return packet
+
+    from ..missions.reads import summary
+
+    return summary(engine, mission_id, candidate_id)
 
 
 def _mission_write_busy(error, *, saved):
@@ -294,14 +308,14 @@ def create_router(database_path):
                 # are not capped at the current recommendation limit.
                 results = list_people(store.connection, company_key=identity["company_key"],
                                       limit=2147483647)
-                return {"items": [{"id": r["id"], "person_key": r["person_key"],
-                                   "name": r["name"], "profile_url": r["profile_url"],
-                                   "status": r["status"], "email": r["email"], "title": r["title"],
-                                   "phone": r["phone"], "ai_contact": r["ai_contact"],
-                                   "public_work_phone": r["public_work_phone"],
-                                   "phone_lookup_blocked": r["phone_lookup_blocked"],
-                                   "operator_supplied": r["operator_supplied"]}
-                                  for r in results["items"]]}
+                fields = (
+                    "id", "person_key", "name", "profile_url", "status", "email", "title",
+                    "phone", "ai_contact", "public_work_phone", "provider_contact",
+                    "email_lookup_blocked", "profile_url_lookup_blocked", "phone_lookup_blocked",
+                    "operator_supplied",
+                )
+                return {"items": [{field: row[field] for field in fields}
+                                  for row in results["items"]]}
             except LookupError as exc:
                 raise HTTPException(404, str(exc)) from exc
 
@@ -309,14 +323,8 @@ def create_router(database_path):
     def outbound_save(payload: OutboundSave):
         from .outbound import save
         with LeadStore(database_path(), initialize=False) as store:
-            engine = SimpleNamespace(store=store, connection=store.connection)
             try:
-                if payload.mission_id == "beings":
-                    from .summaries import company_summary
-                    packet, _ = company_summary(engine, payload.candidate_id)
-                else:
-                    from ..missions.reads import summary
-                    packet = summary(engine, payload.mission_id, payload.candidate_id)
+                packet = _contact_summary(store, payload.candidate_id, payload.mission_id)
                 return save(store.connection, packet, payload.person_key)
             except LookupError as exc:
                 raise HTTPException(404, str(exc)) from exc
@@ -331,14 +339,8 @@ def create_router(database_path):
 
         path = database_path()
         with LeadStore(path, initialize=False) as store, rate_limit_scope(path):
-            engine = SimpleNamespace(store=store, connection=store.connection)
             try:
-                if payload.mission_id == "beings":
-                    from .summaries import company_summary
-                    packet, _ = company_summary(engine, candidate_id)
-                else:
-                    from ..missions.reads import summary
-                    packet = summary(engine, payload.mission_id, candidate_id)
+                packet = _contact_summary(store, candidate_id, payload.mission_id)
                 repo = SalesEngineRepository(store.connection)
                 repo.initialize_schema()
                 return find_contacts(repo, packet, payload.person_key,
@@ -360,16 +362,8 @@ def create_router(database_path):
 
         path = database_path()
         with LeadStore(path, initialize=False) as store, rate_limit_scope(path):
-            engine = SimpleNamespace(store=store, connection=store.connection)
             try:
-                if payload.mission_id == "beings":
-                    from .summaries import company_summary
-
-                    packet, _ = company_summary(engine, candidate_id)
-                else:
-                    from ..missions.reads import summary
-
-                    packet = summary(engine, payload.mission_id, candidate_id)
+                packet = _contact_summary(store, candidate_id, payload.mission_id)
                 return asyncio.run(find_phone(
                     SalesEngineRepository(store.connection), packet, payload.person_key,
                     payload.confirmed_maximum_microusd, manual_retry=payload.manual_retry,
@@ -381,6 +375,36 @@ def create_router(database_path):
             except Exception as exc:
                 raise HTTPException(
                     502, "Phone lookup failed. Check the provider status before retrying."
+                ) from exc
+
+    @router.post("/companies/{candidate_id}/contacts/find-{field}")
+    def individual_contact_lookup(
+        candidate_id: int, field: Literal["email", "profile", "profile-web"],
+        payload: ContactIdentity,
+    ):
+        from ..provider_rate_limit import rate_limit_scope
+        from .individual_lookup import find_individual_field, find_profile_on_web
+        from .persistence import SalesEngineRepository
+
+        path = database_path()
+        with LeadStore(path, initialize=False) as store, rate_limit_scope(path):
+            try:
+                packet = _contact_summary(store, candidate_id, payload.mission_id)
+                repo = SalesEngineRepository(store.connection)
+                if field == "profile-web":
+                    return asyncio.run(find_profile_on_web(repo, packet, payload.person_key))
+                repo.initialize_schema()
+                return asyncio.run(find_individual_field(
+                    repo, packet, payload.person_key,
+                    "profile_url" if field == "profile" else field,
+                ))
+            except LookupError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            except Exception as exc:
+                raise HTTPException(
+                    502, "Lookup failed. Any unconfirmed charge remains reserved."
                 ) from exc
 
     @router.post("/outbound/manual")
@@ -553,6 +577,13 @@ def create_router(database_path):
 
     @router.post("/companies/{candidate_id}/emails")
     async def company_emails(candidate_id: int, payload: EmailLookupRequest):
+        if payload.source_only and payload.confirmed_maximum_microusd not in (
+            0, PEOPLE_MAXIMUM_MICROUSD,
+        ):
+            raise HTTPException(422, "Refresh the contact sourcing estimate")
+        if (not payload.source_only
+                and payload.confirmed_maximum_microusd == PEOPLE_MAXIMUM_MICROUSD):
+            raise HTTPException(422, "Refresh the contact lookup estimate")
         credentials = resolve_treg_credentials()
         microlink_key = os.getenv("MICROLINK_API_KEY", "").strip()
         crawl = payload.confirmed_microlink_requests == REQUESTS_PER_COMPANY
@@ -563,22 +594,38 @@ def create_router(database_path):
         if not (payload.confirmed_maximum_microusd or crawl):
             raise HTTPException(422, "No contact provider request was confirmed")
         database = database_path()
+
+        async def lookup_emails():
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(45.0, connect=10.0),
+                follow_redirects=False,
+                trust_env=False,
+            ) as http_client:
+                return await find_company_emails(
+                    database, candidate_id, TregPeopleClient(credentials, client=http_client),
+                    confirmed_maximum_microusd=payload.confirmed_maximum_microusd,
+                    source_only=payload.source_only,
+                )
+
         try:
-            if payload.confirmed_maximum_microusd:
-                async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(45.0, connect=10.0),
-                    follow_redirects=False,
-                    trust_env=False,
-                ) as http_client:
-                    result = await find_company_emails(
-                        database, candidate_id, TregPeopleClient(credentials, client=http_client),
-                        confirmed_maximum_microusd=payload.confirmed_maximum_microusd,
-                    )
+            microlink = None
+            if payload.confirmed_maximum_microusd and crawl:
+                result, microlink = await asyncio.gather(
+                    lookup_emails(),
+                    crawl_company_contacts(database, candidate_id, microlink_key),
+                    return_exceptions=True,
+                )
+                # Let both providers finish recording their usage before propagating an error.
+                for receipt in (result, microlink):
+                    if isinstance(receipt, BaseException):
+                        raise receipt
+            elif payload.confirmed_maximum_microusd:
+                result = await lookup_emails()
             else:
                 company_email_estimate(database, candidate_id)
                 result = {"attempted": 0, "actual_cost_usd": 0, "message": ""}
-            if crawl:
                 microlink = await crawl_company_contacts(database, candidate_id, microlink_key)
+            if microlink is not None:
                 result["microlink_contact_search"] = microlink
                 result["message"] = " ".join(filter(None, (
                     result.get("message"),

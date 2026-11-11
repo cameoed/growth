@@ -564,7 +564,9 @@ def company_email_estimate(database, candidate_id):
         return {**estimate, "people_scan_running": active is not None}
 
 
-async def find_company_emails(database, candidate_id, client, *, confirmed_maximum_microusd):
+async def find_company_emails(
+    database, candidate_id, client, *, confirmed_maximum_microusd, source_only=False,
+):
     if not await recover_pending_people(database, candidate_id, client):
         return {
             "attempted": 0,
@@ -574,7 +576,8 @@ async def find_company_emails(database, candidate_id, client, *, confirmed_maxim
             "No new paid request was submitted.",
         }
     estimate = company_email_estimate(database, candidate_id)
-    if confirmed_maximum_microusd < estimate["maximum_microusd"]:
+    ceiling = estimate["people_maximum_microusd"] if source_only else estimate["maximum_microusd"]
+    if confirmed_maximum_microusd < ceiling:
         raise ValueError("Lookup maximum changed; reload the company")
     charged = 0
     scanned = False
@@ -746,6 +749,11 @@ async def find_company_emails(database, candidate_id, client, *, confirmed_maxim
                 "message": "People scan complete; no eligible company-matched people found. "
                 "No email lookup charge.",
             }
+    if source_only:
+        return {
+            "attempted": 0, "people_scanned": scanned, "actual_cost_usd": charged / 1_000_000,
+            "message": "Contact sourcing complete." if scanned else "People are already current.",
+        }
     result = await lookup_company_emails(
         database, candidate_id, client, allow_recent_empty=True,
     )

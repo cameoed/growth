@@ -350,7 +350,6 @@ let selectedKey = "";
 let active = false;
 let rendered = false;
 let listSignature = "";
-let renderedListTab = "";
 let currentListPath = "";
 let rankingPace = null;
 let expiryTimer = null;
@@ -397,14 +396,15 @@ function loadingIcon(kind, label, visibleLabel = false) {
   return `<span class="loading-indicator" data-engine-loading="${kind}" role="status" ${isLoading(kind) ? "" : "hidden"}><span class="loading-spinner" aria-hidden="true"></span><span${visibleLabel ? "" : ' class="sr-only"'}>${esc(label)}</span></span>`;
 }
 function syncContactLookupButton() {
-  const control = document.querySelector('#engine-contacts [data-engine="emails"]');
-  if (!control) return;
   const stage = emailLookupStages.get(state.packet?.candidate_id);
   const loading = isLoading("summary");
-  control.disabled = Boolean(stage || loading);
-  if (control.disabled) control.setAttribute("aria-busy", "true");
-  else control.removeAttribute("aria-busy");
-  control.textContent = stage || (loading ? "Loading contacts…" : control.dataset.lookupLabel);
+  for (const control of document.querySelectorAll("#engine-contacts [data-lookup-label]")) {
+    control.disabled = Boolean(stage || loading);
+    if (stage?.action === control.dataset.engine || loading) control.setAttribute("aria-busy", "true");
+    else control.removeAttribute("aria-busy");
+    control.textContent = stage?.action === control.dataset.engine ? stage.label
+      : loading ? "Loading contacts…" : control.dataset.lookupLabel;
+  }
 }
 function syncLoadingIndicators() {
   syncContactLookupButton();
@@ -835,7 +835,21 @@ function companyList(data, saved) {
   const page = Math.floor(listOffset / pageSize) + 1;
   const pending = Boolean(data.loading);
   const range = items.length ? `${(listOffset+1).toLocaleString()}–${(listOffset+items.length).toLocaleString()} of ${total.toLocaleString()}` : `0 of ${total.toLocaleString()}`;
-  const paging = `<div class="engine-pagination" aria-label="Company pagination"><label class="engine-page-size" for="engine-page-size">Per page <select id="engine-page-size">${pageSizes.map(size => `<option value="${size}" ${size === pageSize ? "selected" : ""}>${size}</option>`).join("")}</select></label><span class="engine-page-range" aria-live="polite">${pending ? "…" : range}</span><div class="engine-page-navigation">${button("Previous", "previous", !pending && listOffset > 0 ? "" : "disabled")}<label class="engine-page-number" for="engine-page-number"><span class="sr-only">Page</span><input id="engine-page-number" type="number" min="1" max="${pages}" value="${pending ? 1 : page}" ${pending || !total ? "disabled" : ""}><span> / ${pending ? "…" : pages.toLocaleString()}</span></label>${button("Next", "next", !pending && listOffset+items.length < total ? "" : "disabled")}</div></div>`;
+  const paging = `<div class="engine-pagination" role="group" aria-label="Company pagination">
+    <label class="engine-page-size" for="engine-page-size"><span class="sr-only">Companies per page</span>
+      <select id="engine-page-size">${pageSizes.map(size => `<option value="${size}" ${size === pageSize ? "selected" : ""}>${size}</option>`).join("")}</select>
+      <span aria-hidden="true">/ page</span>
+    </label>
+    <div class="engine-page-actions">
+      ${button("Import", "import", 'aria-label="Import companies"')}
+      ${button("Export", "export", 'aria-label="Export companies as CSV"')}
+    </div>
+    <div class="engine-page-navigation">
+      ${button("‹", "previous", `${!pending && listOffset > 0 ? "" : "disabled"} aria-label="Previous page"`)}
+      <label class="engine-page-number" for="engine-page-number"><span class="sr-only">Page</span><input id="engine-page-number" type="number" min="1" max="${pages}" value="${pending ? 1 : page}" ${pending || !total ? "disabled" : ""}><span> / ${pending ? "…" : pages.toLocaleString()}</span></label>
+      ${button("›", "next", `${!pending && listOffset + items.length < total ? "" : "disabled"} aria-label="Next page"`)}
+    </div>
+  </div>`;
   const scope = `<label class="engine-scope"><span class="sr-only">Company list</span><select id="engine-scope"><option value="queue" ${!saved && companySort === "ranked" ? "selected" : ""}>Ranked companies</option><option value="newest" ${!saved && companySort === "newest" ? "selected" : ""}>Newly discovered</option><option value="pipeline" ${saved ? "selected" : ""}>Saved companies</option></select></label>`;
   const rows = items.map(item => {
     const isSaved = saved || !item.candidate_id;
@@ -846,9 +860,18 @@ function companyList(data, saved) {
     return `<button class="engine-company ${isSelected ? "selected" : ""}" data-engine="${isSaved ? "pipeline-company" : "company"}" data-id="${id}" data-website="${esc(`https://${item.company_key}`)}" aria-pressed="${isSelected}"><span><strong>${esc(item.company_name)}</strong><small>${esc(item.company_key)}</small></span><span class="engine-priority" aria-label="Sales priority ${score ?? "unscored"} out of 100">${score ?? "—"}</span></button>`;
   }).join("");
   const research = !["beings", "all"].includes(missionId) && data.scoring_available !== false
-    ? button("Scan company websites · $0", "mission-research", `title="Scan up to 25 company websites due for research in this mission" ${missionResearchPending ? "disabled" : ""}`)
+    ? button("Scan company websites · $0.00", "mission-research", `title="Scan up to 25 company websites due for research in this mission" ${missionResearchPending ? "disabled" : ""}`)
     : "";
-  return `<section class="panel engine-queue"><div class="panel-head engine-list-header">${scope}<label class="engine-scope"><span class="sr-only">Filter by tag</span><select id="engine-tag"><option value="">All tags</option>${[...new Set(["starred", ...companyTags.map(item => item.tag), ...(selectedTag ? [selectedTag] : [])])].sort().map(tag => `<option value="${esc(tag)}" ${tag === selectedTag ? "selected" : ""}>${esc(tagLabel(tag))}</option>`).join("")}</select></label><span class="engine-list-status">${pending ? loadingIcon("list", loadingCompanies) : `<span>${total.toLocaleString()}</span>`}</span></div>${rankingProgress(data)}<div class="engine-company-list">${rows || `<p class="engine-empty">${data.load_error ? "Could not load companies." : data.loading ? `${loadingCompanies}…` : data.scoring_available === false ? "Mission setup is incomplete." : !saved && data.coverage?.more_may_exist ? `${esc(updatingRankingsLabel())}…` : data.scope === "mission_matches" ? "No mission matches in saved evidence." : "No companies found."}</p>`}</div>${paging}<details class="engine-list-tools"><summary>Company list actions</summary>${research}${research ? '<p>Scans up to 25 company websites due for research in this mission.</p>' : ""}${selectedTag ? button("Re-score tag", "tag-rescore", `title="Re-score this entire tag from saved evidence; no provider charges" ${tagMutation ? "disabled" : ""}`) + button("Re-scan tag", "tag-rescan", `title="Fetch public websites again, then re-score; no paid providers" ${tagMutation ? "disabled" : ""}`) : ""}${button("Import companies", "import")}${button("Export CSV", "export")}</details></section>`;
+  const scanMore = total < 50 && !pending && !data.load_error && data.scoring_available !== false
+    ? '<div class="engine-scan-more"><button type="button" class="button primary" data-view-target="intelligence">Scan to Find More</button></div>'
+    : "";
+  const tagActions = selectedTag
+    ? button("Re-score tag", "tag-rescore", `title="Re-score this entire tag from saved evidence; no provider charges" ${tagMutation ? "disabled" : ""}`)
+      + button("Re-scan tag", "tag-rescan", `title="Fetch public websites again, then re-score; no paid providers" ${tagMutation ? "disabled" : ""}`)
+    : "";
+  const researchActions = research || tagActions
+    ? `<div class="engine-list-research">${research}${tagActions}</div>` : "";
+  return `<section class="panel engine-queue"><div class="panel-head engine-list-header">${scope}<label class="engine-scope"><span class="sr-only">Filter by tag</span><select id="engine-tag"><option value="">All tags</option>${[...new Set(["starred", ...companyTags.map(item => item.tag), ...(selectedTag ? [selectedTag] : [])])].sort().map(tag => `<option value="${esc(tag)}" ${tag === selectedTag ? "selected" : ""}>${esc(tagLabel(tag))}</option>`).join("")}</select></label><span class="engine-list-status">${pending ? loadingIcon("list", loadingCompanies) : `<span class="engine-page-range" aria-live="polite">${range}</span>`}</span></div>${rankingProgress(data)}<div class="engine-company-list">${rows || `<p class="engine-empty">${data.load_error ? "Could not load companies." : data.loading ? `${loadingCompanies}…` : data.scoring_available === false ? "Mission setup is incomplete." : !saved && data.coverage?.more_may_exist ? `${esc(updatingRankingsLabel())}…` : data.scope === "mission_matches" ? "No mission matches in saved evidence." : "No companies found."}</p>`}${scanMore}</div>${researchActions}${paging}</section>`;
 }
 
 const pendingPersonSaves = new Map();
@@ -866,44 +889,110 @@ function savedPerson(person, packet = state.packet) {
 }
 const pendingAIContacts = new Set();
 const pendingPhoneContacts = new Set();
+const pendingContactFields = new Map();
+const INDIVIDUAL_CONTACT_LOOKUPS = {
+  "find-contact-email": {field:"email", route:"find-email", label:"email", estimate:"$0.03"},
+  "find-contact-profile": {field:"profile_url", route:"find-profile", label:"profile", estimate:"$0.01"},
+  "find-contact-profile-web": {field:"profile_url", route:"find-profile-web", label:"profile"},
+};
 const phoneRetryStates = new Map();
+const exhaustedContactFields = new Map();
+const profileWebAvailable = new Set();
+const exhaustedLookupHelp = "All paths to find this information have been exhausted.";
+
+function exhaustedLookupButton(label, action, person) {
+  return `<span class="engine-lookup-exhausted" title="${exhaustedLookupHelp}">${button(label, action,
+    `disabled data-person-key="${esc(person.prospect_key)}" aria-description="${exhaustedLookupHelp}"`)}</span>`;
+}
+const PHONE_PROFILE = /^https?:\/\/(www\.)?linkedin\.com\/in\/[A-Za-z0-9._%~-]+\/?(?:[?#].*)?$/i;
+const COMPANY_PHONE_BATCH_LIMIT = 10;
+// Catalog prices for LeadOcean, BlitzAPI and the conditional Tomba stage.
+const COMPANY_PHONE_ESTIMATE_MICROUSD = COMPANY_PHONE_BATCH_LIMIT * (5000 + 495 + 44500);
+
+function canFindPhone(person) {
+  return Boolean(person.prospect_key && person.name && person.name !== person.email
+    && person.name !== person.phone && !person.phone && !person.phone_lookup_blocked
+    && PHONE_PROFILE.test(person.profile_url || ""));
+}
+
+function rememberPhoneLookup(result, packet, key) {
+  if (result.contact) rememberProspect(result.contact, packet.company_key);
+  if (!result.found && result.retry_used && result.complete !== false) {
+    phoneRetryStates.set(key, "exhausted");
+  } else if (result.retry_used) phoneRetryStates.set(key, "used");
+  else if (result.retry_available) phoneRetryStates.set(key, "available");
+}
+
+const contactUsdFormatter = new Intl.NumberFormat("en-US", {style:"currency", currency:"USD"});
+
+function contactCharge(microusd) {
+  return contactUsdFormatter.format(microusd / 1_000_000);
+}
 const aiContactRetryKeys = new Map();
 export function contactLookupActions(person, packet) {
   const key = pendingPersonKey(packet?.company_key, person.prospect_key);
   const pending = pendingAIContacts.has(key);
   const findingPhone = pendingPhoneContacts.has(key);
+  const findingField = pendingContactFields.get(key);
+  const companyLookup = emailLookupStages.get(packet?.candidate_id);
   const retry = phoneRetryStates.get(key);
-  const phoneLabel = retry === "available" ? "Try again · $0.045" : "Find phone";
+  const phoneLabel = retry === "available" ? "Try again · $0.05" : "Find phone";
   const named = person.prospect_key && packet?.candidate_id
     && person.name !== person.email && person.name !== person.phone;
   const needsPhone = !person.phone && !person.phone_lookup_blocked;
   const label = aiContactRetryKeys.has(key) ? "Search again with AI" : "Prospect with AI";
   const find = named && (!person.email || needsPhone)
-    ? button(pending ? "Searching web…" : label, "find-contact-ai", `data-person-key="${esc(person.prospect_key)}" aria-label="${label} for email and phone for ${esc(person.name)}, $0.20 maximum" ${pending ? 'disabled aria-busy="true"' : findingPhone ? "disabled" : ""}`) : "";
-  const findPhone = named && needsPhone && retry !== "used" && packet?.email_lookup?.configured === true
-    && /^https?:\/\/(www\.)?linkedin\.com\/in\/[A-Za-z0-9._%~-]+\/?(?:[?#].*)?$/i.test(person.profile_url || "")
-    ? button(findingPhone ? "Finding phone…" : phoneLabel, "find-contact-phone",
-      `data-person-key="${esc(person.prospect_key)}" aria-label="${phoneLabel} for ${esc(person.name)}" ${findingPhone ? 'disabled aria-busy="true"' : pending ? "disabled" : ""}`) : "";
-  return {phone:findPhone, ai:find};
+    ? button(pending ? "Searching web…" : label, "find-contact-ai", `data-person-key="${esc(person.prospect_key)}" aria-label="${label} for email and phone for ${esc(person.name)}, $0.20 maximum" ${pending ? 'disabled aria-busy="true"' : findingPhone || findingField || companyLookup?.action === "emails" ? "disabled" : ""}`) : "";
+  const phoneDisabled = pending || findingField || companyLookup;
+  const findPhone = named && canFindPhone(person) && retry !== "used"
+    && packet?.email_lookup?.configured === true
+    ? retry === "exhausted" ? exhaustedLookupButton("Find phone", "find-contact-phone", person)
+      : button(findingPhone ? "Finding..." : phoneLabel, "find-contact-phone",
+      `data-person-key="${esc(person.prospect_key)}" aria-label="${phoneLabel} for ${esc(person.name)}" ${findingPhone ? 'disabled aria-busy="true"' : phoneDisabled ? "disabled" : ""}`) : "";
+  const fieldButton = action => {
+    const {field, label, estimate} = INDIVIDUAL_CONTACT_LOOKUPS[action];
+    const web = action === "find-contact-profile-web";
+    const providerReady = web ? packet.email_lookup?.microlink_configured
+      : packet.email_lookup?.configured;
+    if (!named || !person.name.trim().includes(" ") || person[field]
+        || person[`${field}_lookup_blocked`] || !providerReady) return "";
+    if (exhaustedContactFields.get(key)?.has(action)) {
+      return exhaustedLookupButton(`Find ${label}`, action, person);
+    }
+    const finding = findingField === action;
+    const text = web ? "Search web · 1 request" : `Find ${label}`;
+    const ceiling = web ? "1 Microlink subscription request" : `Up to ${estimate}`;
+    return button(finding ? "Finding..." : text, action,
+      `data-person-key="${esc(person.prospect_key)}" aria-label="${text} for ${esc(person.name)}, ${ceiling}" title="${ceiling}" ${finding ? 'disabled aria-busy="true"' : pending || findingPhone || findingField || companyLookup ? "disabled" : ""}`);
+  };
+  const profileAction = profileWebAvailable.has(key) && packet.email_lookup?.microlink_configured
+    ? "find-contact-profile-web" : "find-contact-profile";
+  return {phone:findPhone, ai:find,
+    email:fieldButton("find-contact-email"), profile:fieldButton(profileAction)};
 }
 function contactActions(person) {
-  const lookup = contactLookupActions(person, state.packet);
   const saved = savedPerson(person);
   const save = person.prospect_key && state.packet?.candidate_id
     ? button(saved ? "Saved" : "Save", "save-person",
       `data-person-key="${esc(person.prospect_key)}" aria-label="${saved ? "Saved" : "Save"} ${esc(person.name)}" ${saved?.pending ? 'aria-busy="true" title="Saving in background"' : ""} ${saved ? "disabled" : ""}`,
       "button primary") : "";
-  return `<div class="engine-contact-actions">${lookup.ai}${save}</div>`;
+  return `<div class="engine-contact-actions">${save}</div>`;
 }
 function contactPeople(p) {
   const current = (p.contact_recommendations?.people || []).map(person => {
     const saved = savedPerson(person, p);
-    return {...person, email:person.email || saved?.email, phone:saved?.phone || person.phone,
+    return {...person, email:saved?.email_lookup_blocked ? null : person.email || saved?.email,
+      phone:saved?.phone || person.phone,
+      profile_url:saved?.profile_url_lookup_blocked ? null : person.profile_url || saved?.profile_url,
       ai_contact:saved?.ai_contact || {}, public_work_phone:saved?.public_work_phone,
+      provider_contact:saved?.provider_contact,
+      email_lookup_blocked:saved?.email_lookup_blocked,
+      profile_url_lookup_blocked:saved?.profile_url_lookup_blocked,
       phone_lookup_blocked:saved?.phone_lookup_blocked};
   });
   const companyEmail = p.contact_recommendations?.company_contact?.email?.toLowerCase();
-  const extra = (p.outbound_people || []).filter(row => (row.operator_supplied || row.public_work_phone || Object.keys(row.ai_contact || {}).length)
+  const extra = (p.outbound_people || []).filter(row => (row.operator_supplied || row.public_work_phone || Object.keys(row.ai_contact || {}).length
+    || Object.keys(row.provider_contact || {}).length)
     && !(row.email && row.name === row.email && row.email.toLowerCase() === companyEmail)
     && !current.some(person => row.person_key === person.prospect_key
       || (row.profile_url && row.profile_url === person.profile_url)
@@ -927,7 +1016,10 @@ function prospectSources(person) {
   const source = !person.operator_supplied && exactProspectSource(person.source_url);
   const emailSource = person.email
     ? exactProspectSource(person.email_source_url) : "";
-  const evidence = aiContactSources(person);
+  const evidence = aiContactSources(person) + Object.entries(person.provider_contact || {})
+    .filter(([field, item]) => item.value === person[field])
+    .map(([field, item]) => `<p>${field === "email" ? "Work email" : "Profile"}: ${esc(item.provider)}</p>`)
+    .join("");
   const profile = !source && person.source_kind === "licensed_professional_provider"
     ? exactProspectSource(person.profile_url) : "";
   return (source ? link(source, "View source") : "")
@@ -1049,7 +1141,7 @@ function contactTableRow(person) {
   const lookup = contactLookupActions(person, state.packet);
   const email = person.email
     ? `<button type="button" class="text-button engine-email" data-copy-email="${esc(person.email)}" aria-label="Copy ${esc(person.email)}">${esc(person.email)}</button>`
-    : '<span class="muted">—</span>';
+    : lookup.email || '<span class="muted">—</span>';
   const phone = person.phone && /^\+?[0-9]{7,15}$/.test(person.phone)
     ? `<a href="tel:${esc(person.phone)}" aria-label="Call ${esc(person.name)}">${esc(person.phone.replace(/^(?:\+1)?(\d{3})(\d{3})(\d{4})$/, "($1) $2-$3"))}</a>`
     : person.phone ? esc(person.phone) : lookup.phone || '<span class="muted">—</span>';
@@ -1057,7 +1149,7 @@ function contactTableRow(person) {
     <td><div class="engine-person-info"><strong>${esc(person.name)}</strong>
       <span>${esc(person.title || "")}</span>
 </div></td>
-    <td>${person.profile_url ? link(person.profile_url, /^https?:\/\/(?:[a-z0-9-]+\.)?linkedin\.com\//i.test(person.profile_url) ? "LinkedIn ↗" : "Profile ↗") : '<span class="muted">—</span>'}</td>
+    <td>${person.profile_url ? link(person.profile_url, /^https?:\/\/(?:[a-z0-9-]+\.)?linkedin\.com\//i.test(person.profile_url) ? "LinkedIn ↗" : "Profile ↗") : lookup.profile || '<span class="muted">—</span>'}</td>
     <td><div class="engine-contact-email">${email}</div></td>
     <td class="engine-contact-phone">${phone}</td>
     <td>${contactActions(person)}</td>
@@ -1089,17 +1181,22 @@ function contactPanel(p) {
   const companyPhone = /^\+?[0-9]{7,15}$/.test(fallback?.phone || "") ? fallback.phone : "";
   const website = `https://${p.company_key}`;
   const contactRoute = fallback?.url && fallback.url.replace(/\/$/, "") !== website;
-  const emailMaximum = Math.ceil((p.email_lookup_estimate?.maximum_microusd ?? 50000) / 10000) / 100;
+  const emailMaximum = p.email_lookup_estimate?.people_checked_without_candidates
+    ? 0 : p.email_lookup_estimate?.maximum_microusd ?? 53040;
+  const estimatedSpend = Math.ceil((emailMaximum + COMPANY_PHONE_ESTIMATE_MICROUSD) / 10000) / 100;
   const lookupStage = emailLookupStages.get(p.candidate_id);
-  const treg = p.email_lookup?.configured === true && !p.email_lookup_estimate?.people_checked_without_candidates;
+  const treg = p.email_lookup?.configured === true
+    && (!p.email_lookup_estimate?.people_checked_without_candidates || people.some(canFindPhone));
   const microlink = p.email_lookup?.microlink_configured === true;
-  const cost = `$${emailMaximum.toFixed(2)} max`;
-  const lookupLabel = microlink
-    ? (treg ? `Find contacts · ${cost} + Microlink` : "Find contacts · Microlink")
-    : `Find emails · ${cost}`;
-  const lookupAttributes = `data-lookup-label="${esc(lookupLabel)}"`
-    + (microlink ? ' title="Microlink uses your subscription allowance"' : "");
-  const emailControl = `<div class="engine-email-control">${p.candidate_id && !p.summary_loading ? button("Input prospect", "add-prospect") : ""}${p.candidate_id && !p.summary_loading && (treg || microlink) ? button(lookupStage || lookupLabel, "emails", lookupAttributes, "button primary") : ""}</div>`;
+  const lookupLabel = treg ? `Find all ~$${estimatedSpend.toFixed(2)}` : "Find all";
+  const lookupAttributes = `data-lookup-label="${esc(lookupLabel)}"`;
+  const canSource = microlink || (treg && p.email_lookup_estimate?.needs_people_scan !== false);
+  const sourceLabel = "Source contacts";
+  const sourceButton = p.candidate_id && !p.summary_loading && canSource
+    ? button(lookupStage?.action === "source-contacts" ? lookupStage.label : sourceLabel, "source-contacts",
+      `data-lookup-label="${sourceLabel}"${lookupStage ? " disabled" : ""}${lookupStage?.action === "source-contacts" ? ' aria-busy="true"' : ""}`)
+    : "";
+  const emailControl = `<div class="engine-email-control">${p.candidate_id && !p.summary_loading ? button("Input prospect", "add-prospect") : ""}${sourceButton}${p.candidate_id && !p.summary_loading && (treg || microlink) ? button(lookupStage?.action === "emails" ? lookupStage.label : lookupLabel, "emails", lookupAttributes + (lookupStage ? " disabled" : "") + (lookupStage?.action === "emails" ? ' aria-busy="true"' : ""), "button primary") : ""}</div>`;
   const phoneLabel = companyPhone.replace(/^(?:\+1)?(\d{3})(\d{3})(\d{4})$/, "($1) $2-$3");
   const emailSaving = fallback?.email && pendingEmailSaves.has(`${p.company_key}:${fallback.email.toLowerCase()}`);
   const companyRow = fallback && (fallback.email || contactRoute || companyPhone)
@@ -1108,7 +1205,7 @@ function contactPanel(p) {
       <td>${contactRoute ? link(fallback.url, "Visit ↗") : '<span class="muted">—</span>'}</td>
       <td><div class="engine-contact-email">${fallback.email ? `<button type="button" class="text-button engine-email" data-copy-email="${esc(fallback.email)}" aria-label="Copy ${esc(fallback.email)}">${esc(fallback.email)}</button>` : '<span class="muted">—</span>'}</div></td>
       <td class="engine-contact-phone">${companyPhone ? `<a href="tel:${esc(companyPhone)}" aria-label="Call company at ${esc(phoneLabel)}">${esc(phoneLabel)}</a>` : '<span class="muted">—</span>'}</td>
-      <td><div class="engine-contact-actions">${fallback.email && p.candidate_id ? button(emailSaving ? "Saving…" : savedEmail(fallback.email, p) ? "Update" : "Save prospect", "save-company-email", emailSaving ? 'disabled aria-busy="true"' : "", "button primary") : ""}</div></td>
+      <td><div class="engine-contact-actions">${fallback.email && p.candidate_id ? button(emailSaving ? "Saving…" : savedEmail(fallback.email, p) ? "Update" : "Save", "save-company-email", emailSaving ? 'disabled aria-busy="true"' : "", "button primary") : ""}</div></td>
     </tr>` : "";
   return `<section class="engine-contacts" id="engine-contacts"><div class="panel-head"><h3>Contacts</h3><div class="engine-contact-header-end">${p.summary_loading ? loadingIcon("summary", "Loading contacts") : ""}${emailControl}</div></div>${contactsTable(people, p.summary_loading, companyRow)}</section>`;
 }
@@ -1335,20 +1432,18 @@ function renderList(preservePosition = false) {
   document.querySelector("#view-sales")?.classList?.toggle("engine-first-launch", onboarding);
   const data = state.tab === "pipeline" ? pipelineData : state.overview;
   const signature = JSON.stringify(onboarding ? ["onboarding", onboardingStep, onboardingStorageHelp, onboardingKeyConfigured] :
-    [state.tab, state.search, selectedTag, companyTags, missionId, currentMissionTitle(), companySort, listOffset, pageSize, pipelineStage, data,
+    [state.tab, state.search, selectedTag, tagMutation, missionResearchPending, companyTags, missionId, currentMissionTitle(), companySort, listOffset, pageSize, pipelineStage, data,
     rankingEstimate(data?.coverage?.inventory_total, data?.coverage?.reviewed_locally),
     (data?.items || []).map(expired)]);
   if (node && listSignature !== signature) {
     const focus = document.activeElement?.id;
     const scrollTop = preservePosition ? node.querySelector(".engine-company-list")?.scrollTop : null;
     const focusedRow = preservePosition ? document.activeElement?.closest?.(".engine-company") : null;
-    const tools = renderedListTab === state.tab ? node.querySelector(".engine-list-tools") : null;
     node.innerHTML = !onboarding && state.tab === "pipeline" ? pipeline() : queue();
-    if (tools) node.querySelector(".engine-list-tools")?.replaceWith(tools);
     if (["engine-page-size", "engine-page-number"].includes(focus)) node.querySelector(`#${focus}`)?.focus?.();
     if (scrollTop != null) node.querySelector(".engine-company-list").scrollTop = scrollTop;
     if (focusedRow) node.querySelector(`.engine-company[data-engine="${focusedRow.dataset.engine}"][data-id="${focusedRow.dataset.id}"]`)?.focus?.({preventScroll:true});
-    listSignature = signature; renderedListTab = state.tab;
+    listSignature = signature;
   }
   for (const row of document.querySelectorAll(".engine-company")) {
     const selected = selectionPath(row.dataset.id, row.dataset.engine === "pipeline-company") === selectedKey;
@@ -1451,29 +1546,81 @@ async function loadPacket(id, isPipeline = false, {refresh = false} = {}) {
     }
   }
 }
-async function runCompanyContactLookup(candidateId, maximum, updateStage, microlinkRequests = 0) {
+async function runCompanyContactLookup(
+  candidateId, maximum, updateStage, microlinkRequests = 0, sourceOnly = false,
+) {
   const path = `/companies/${candidateId}/emails`;
   const result = await api(path, {
     confirmed_maximum_microusd:maximum,
+    ...(sourceOnly ? {source_only:true} : {}),
     ...(microlinkRequests ? {confirmed_microlink_requests:microlinkRequests} : {}),
   });
-  if (!result.waiting_for_people) return result;
+  if (!result.waiting_for_people || sourceOnly) return result;
   updateStage("Waiting for people…");
   for (let attempt = 0; attempt < 60; attempt++) {
     await new Promise(resolve => setTimeout(resolve, 2000));
     if (!active || state.packet?.candidate_id !== candidateId) {
-      return {message:"The existing people scan continues. No email request was sent."};
+      return {...result, message:"The existing people scan continues. No email request was sent."};
     }
     const estimate = await api(`${path}/estimate`);
     if (estimate.people_scan_running) continue;
     if (estimate.needs_people_scan || estimate.people_checked_without_candidates) {
-      return {message:"People scan finished without eligible contacts. No email request was sent."};
+      return {...result, waiting_for_people:false, message:"People scan finished without eligible contacts. No email request was sent."};
     }
-    updateStage("Finding emails…");
+    updateStage("Finding contacts…");
     // Email-only ceiling prevents another paid people scan if contacts change meanwhile.
-    return await api(path, {confirmed_maximum_microusd:Math.min(maximum, estimate.email_maximum_microusd)});
+    try {
+      const emails = await api(path, {
+        confirmed_maximum_microusd:Math.min(maximum, estimate.email_maximum_microusd),
+      });
+      return {...result, ...emails, waiting_for_people:Boolean(emails.waiting_for_people)};
+    } catch (error) {
+      return {...result, waiting_for_people:false, actual_cost_usd:null,
+        error:true, message:error.message};
+    }
   }
-  return {message:"People scan is still running. No duplicate scan or email charge was submitted."};
+  return {...result, message:"People scan is still running. No duplicate scan or email charge was submitted."};
+}
+
+async function runCompanyPhoneLookup(packet, summaryPath, lookupMission, updateStage) {
+  const result = {found:0, failures:0, knownCost:0, chargeUnknown:false};
+  updateStage("Finding phone numbers…");
+  const summary = await api(summaryPath);
+  if (summary.company_key !== packet.company_key) throw new Error("Company changed during lookup");
+  const saved = await api(`/outbound/company/${packet.candidate_id}`);
+  const people = contactPeople({...summary, outbound_people:saved.items || []})
+    .filter(person => canFindPhone(person)
+      && phoneRetryStates.get(pendingPersonKey(packet.company_key, person.prospect_key)) !== "exhausted")
+    .slice(0, COMPANY_PHONE_BATCH_LIMIT);
+  for (const person of people) {
+    const key = pendingPersonKey(packet.company_key, person.prospect_key);
+    if (pendingPhoneContacts.has(key) || pendingAIContacts.has(key) || pendingContactFields.has(key)) continue;
+    pendingPhoneContacts.add(key);
+    try {
+      const path = `/companies/${packet.candidate_id}/contacts/find-phone`;
+      const request = {person_key:person.prospect_key, mission_id:lookupMission};
+      const record = lookup => {
+        if (Number.isSafeInteger(lookup.cost_microusd)) result.knownCost += lookup.cost_microusd;
+        else result.chargeUnknown = true;
+        result.found += Number(Boolean(lookup.found));
+        rememberPhoneLookup(lookup, packet, key);
+      };
+      const first = await api(path, request);
+      record(first);
+      let final = first;
+      if (!first.found && first.retry_available && !first.retry_used && !first.retry_at) {
+        final = await api(path, {...request, manual_retry:true});
+        record(final);
+      }
+      if (final.complete === false) result.failures++;
+    } catch {
+      result.failures++;
+      result.chargeUnknown = true;
+    } finally {
+      pendingPhoneContacts.delete(key);
+    }
+  }
+  return result;
 }
 
 let contactScrollFrame;
@@ -1526,10 +1673,18 @@ export async function runContactLookup(action, packet, person) {
   if (!packet?.candidate_id || !person?.prospect_key || !person.name
       || person.name === person.email || person.name === person.phone) return;
   const phone = action === "find-contact-phone";
-  if (phone && (person.phone || person.phone_lookup_blocked)) return;
+  const fieldLookup = INDIVIDUAL_CONTACT_LOOKUPS[action];
+  const ai = action === "find-contact-ai";
+  if (ai && emailLookupStages.get(packet.candidate_id)?.action === "emails") return;
+  if (fieldLookup && (person[fieldLookup.field] || person[`${fieldLookup.field}_lookup_blocked`]
+      || emailLookupStages.has(packet.candidate_id))) return;
+  if (phone && (!canFindPhone(person) || emailLookupStages.has(packet.candidate_id))) return;
   const key = pendingPersonKey(packet.company_key, person.prospect_key);
-  if (pendingAIContacts.has(key) || pendingPhoneContacts.has(key)
-      || (phone && phoneRetryStates.get(key) === "used")) return;
+  const profileWeb = action === "find-contact-profile-web";
+  if (profileWeb && (!profileWebAvailable.has(key) || !packet.email_lookup?.microlink_configured)) return;
+  if (pendingAIContacts.has(key) || pendingPhoneContacts.has(key) || pendingContactFields.has(key)
+      || exhaustedContactFields.get(key)?.has(action)
+      || (phone && ["used", "exhausted"].includes(phoneRetryStates.get(key)))) return;
   const pending = phone ? pendingPhoneContacts : pendingAIContacts;
   const refreshActions = () => {
     if (state.packet?.company_key === packet.company_key) renderPacket();
@@ -1539,25 +1694,42 @@ export async function runContactLookup(action, packet, person) {
     if (callbacks.notify) callbacks.notify(text, tone);
     else if (state.packet?.company_key === packet.company_key) message(text);
   };
-  pending.add(key);
+  if (fieldLookup) pendingContactFields.set(key, action);
+  else pending.add(key);
   refreshActions();
   try {
-    const result = await api(`/companies/${packet.candidate_id}/contacts/${phone ? "find-phone" : "find-with-ai"}`, {
+    const result = await api(`/companies/${packet.candidate_id}/contacts/${fieldLookup?.route || (phone ? "find-phone" : "find-with-ai")}`, {
       person_key:person.prospect_key, mission_id:missionId,
-      ...(!phone ? {confirmed_maximum_microusd:200000}
-        : phoneRetryStates.get(key) === "available" ? {manual_retry:true} : {}),
-      ...(!phone && aiContactRetryKeys.has(key) ? {retry_cache_key:aiContactRetryKeys.get(key)} : {}),
+      ...(ai ? {confirmed_maximum_microusd:200000}
+        : phone && phoneRetryStates.get(key) === "available" ? {manual_retry:true} : {}),
+      ...(ai && aiContactRetryKeys.has(key) ? {retry_cache_key:aiContactRetryKeys.get(key)} : {}),
     });
-    if (result.contact) rememberProspect(result.contact, packet.company_key);
-    if (phone) {
-      if (result.retry_used) phoneRetryStates.set(key, "used");
-      else if (result.retry_available) phoneRetryStates.set(key, "available");
-      const outcome = result.found ? "Phone number saved" : "No phone number found";
+    if (fieldLookup) {
+      if (result.contact) rememberProspect(result.contact, packet.company_key);
+      if (result.web_search_available) profileWebAvailable.add(key);
+      if (!result.found && (profileWeb || result.failed === false)) {
+        const fields = exhaustedContactFields.get(key) || new Set();
+        fields.add(action);
+        exhaustedContactFields.set(key, fields);
+      }
+      const label = fieldLookup.label === "email" ? "Work email" : "Profile";
+      const outcome = result.failed ? `${label} lookup could not finish`
+        : result.found ? `${label} saved` : `No ${label.toLowerCase()} found`;
+      const cost = Number.isSafeInteger(result.cost_microusd)
+        ? ` · ${contactCharge(result.cost_microusd)} charged` : "";
+      notify(outcome + cost, result.failed ? "error" : result.found ? "success" : "info");
+    } else if (phone) {
+      rememberPhoneLookup(result, packet, key);
+      const outcome = result.found ? "Phone number saved"
+        : result.retry_at ? "The phone provider didn’t finish. Try again in a few minutes."
+        : result.complete === false ? "The phone search finished with limited results."
+        : "No phone number found";
       const cost = Number.isFinite(result.cost_microusd)
-        ? `$${(result.cost_microusd / 1_000_000).toFixed(6).replace(/0{1,4}$/, "")}` : "";
+        ? contactCharge(result.cost_microusd) : "";
       const details = [outcome, result.cached ? "Cached lookup" : "", cost ? `${cost} charged` : ""];
       notify(details.filter(Boolean).join(" · "), result.found ? "success" : "info");
     } else {
+      if (result.contact) rememberProspect(result.contact, packet.company_key);
       if (result.cache_key) aiContactRetryKeys.set(key, result.cache_key);
       const confirmed = result.search?.completed_searches > 0;
       const source = result.cached ? "Cached web search (no new charge)" : `Web search complete (${result.search?.source_count ?? 0} sources)`;
@@ -1570,7 +1742,8 @@ export async function runContactLookup(action, packet, person) {
   } catch (error) {
     notify(error.message, "error");
   } finally {
-    pending.delete(key);
+    if (fieldLookup) pendingContactFields.delete(key);
+    else pending.delete(key);
     refreshActions();
   }
 }
@@ -1599,7 +1772,8 @@ async function handleClick(node) {
     showOnboardingStep(steps[steps.indexOf(onboardingStep) - 1]);
     return;
   }
-  if (action === "find-contact-ai" || action === "find-contact-phone") {
+  if (action === "find-contact-ai" || action === "find-contact-phone"
+      || INDIVIDUAL_CONTACT_LOOKUPS[action]) {
     const packet = state.packet;
     const person = packet && contactPeople(packet).find(p => p.prospect_key === node.dataset.personKey);
     await runContactLookup(action, packet, person);
@@ -1697,37 +1871,94 @@ async function handleClick(node) {
   if(action === "mission-edit")openMissionDialog("edit",node.dataset.id);
   if(action === "mission-compile")openMissionDialog("compile",node.dataset.id || missionId);
   if(action === "mission-cancel")closeMissionDialog();
-  if (action === "emails") {
+  if (action === "emails" || action === "source-contacts") {
+    const sourceOnly = action === "source-contacts";
     const p = state.packet;
     if (!p?.candidate_id || safeSummary(p).summary_loading || isLoading("summary")
         || emailLookupStages.has(p.candidate_id)) return;
     const updateStage = label => {
-      emailLookupStages.set(p.candidate_id, label);
+      emailLookupStages.set(p.candidate_id, {action, label});
       syncContactLookupButton();
     };
     const notify = (text, tone) => {
       if (callbacks.notify) callbacks.notify(text, tone);
       else if (state.packet?.candidate_id === p.candidate_id) message(text);
     };
+    const lookupMission = missionId;
+    const summaryPath = missionPath(`/companies/${p.candidate_id}/summary`);
     updateStage("Starting…");
     try {
+      renderPacket();
+      callbacks.contactLookupChanged?.();
       const estimate = await api(`/companies/${p.candidate_id}/emails/estimate`);
-      const maximum = estimate.maximum_microusd;
+      const treg = p.email_lookup?.configured === true;
+      const maximum = treg && !estimate.people_checked_without_candidates
+        ? (sourceOnly ? estimate.people_maximum_microusd : estimate.maximum_microusd) || 0 : 0;
       const microlinkRequests = p.email_lookup?.microlink_configured
         ? estimate.microlink_max_requests : 0;
-      if (!maximum && !microlinkRequests) {
-        notify("No contact search is due.", "info");
+      if ((!treg || sourceOnly) && !maximum && !microlinkRequests) {
+        notify(sourceOnly ? "Contact sources are already current." : "No contact search is due.", "info");
         return;
       }
-      updateStage(microlinkRequests ? "Searching contacts…" : estimate.needs_people_scan ? "Scanning people…" : "Finding emails…");
-      const result = await runCompanyContactLookup(p.candidate_id, maximum, updateStage, microlinkRequests);
-      if (state.packet?.candidate_id === p.candidate_id) await loadSalesWorkbench({invalidate:true});
-      notify(result.message);
+      let emails = {actual_cost_usd:0};
+      if (maximum || microlinkRequests) {
+        updateStage(sourceOnly ? "Sourcing…"
+          : maximum && microlinkRequests ? "Checking emails and websites…"
+          : microlinkRequests ? "Checking company website…" : "Finding contacts…");
+        try {
+          emails = await runCompanyContactLookup(
+            p.candidate_id, maximum, updateStage, microlinkRequests, sourceOnly,
+          );
+        } catch (error) {
+          emails = {actual_cost_usd:null, error:true, message:error.message};
+        }
+      }
+      let phones;
+      if (!sourceOnly && treg && !emails.waiting_for_people) {
+        try {
+          phones = await runCompanyPhoneLookup(p, summaryPath, lookupMission, updateStage);
+        } catch {
+          phones = {failures:1, knownCost:0, chargeUnknown:false};
+        }
+      }
+      const knownEmailCost = Number.isFinite(emails.actual_cost_usd);
+      const total = (knownEmailCost ? Math.round(emails.actual_cost_usd * 1_000_000) : 0)
+        + (phones?.knownCost || 0);
+      const unconfirmed = !knownEmailCost || phones?.chargeUnknown;
+      const charge = unconfirmed
+        ? `${contactCharge(total)} confirmed · total charge pending`
+        : total ? `Total charged ${contactCharge(total)}` : "No charge";
+      const microlink = emails.microlink_contact_search;
+      const lookupErrors = [emails.error, ...(emails.errors || []), ...(emails.saved_errors || [])]
+        .filter(Boolean);
+      const emailStatus = lookupErrors.some(error => error.kind === "timeout")
+        ? sourceOnly ? "Contact sourcing timed out" : "Email lookup timed out"
+        : lookupErrors.length || !knownEmailCost
+          ? sourceOnly ? "Contact sourcing incomplete" : "Email lookup incomplete"
+          : emails.waiting_for_people ? "Contact search still running"
+          : (emails.message || "").startsWith("Saved email results or reserved attempts reused")
+            ? "No new email search was run." : microlink ? "" : emails.message || "";
+      const details = [
+        phones?.found ? `${phones.found} phone ${phones.found === 1 ? "number" : "numbers"} saved` : "",
+        emailStatus,
+        phones?.failures ? "We couldn’t finish checking for phone numbers." : "",
+        microlink?.status === "failed" ? "Website contact search failed"
+          : microlink?.status === "partial" ? "Website contact search incomplete" : "",
+        charge,
+        microlink?.requests ? `${microlink.requests} Microlink requests from subscription` : "",
+      ];
+      if (state.packet?.candidate_id === p.candidate_id) {
+        void loadSalesWorkbench({invalidate:true, background:true});
+      }
+      notify(details.filter(Boolean).join(" · "),
+        unconfirmed || lookupErrors.length || phones?.failures || ["partial", "failed"].includes(microlink?.status)
+          ? "error" : emails.waiting_for_people ? "info" : "success");
     } catch (error) {
-      if (!cancelled(error)) notify(`Could not find contacts. ${error.message}`, "error");
+      if (!cancelled(error)) notify("We couldn’t finish the contact search.", "error");
     } finally {
       emailLookupStages.delete(p.candidate_id);
-      syncContactLookupButton();
+      if (state.packet?.candidate_id === p.candidate_id) renderPacket();
+      callbacks.contactLookupChanged?.();
     }
   }
   if (action === "company") await loadPacket(node.dataset.id);

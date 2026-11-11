@@ -328,7 +328,7 @@ def reserve(connection, budget, cap, key, lane):
 
 async def provider_search(client, api_key, recipe):
     lane, surface, market, _, query = recipe[:5]
-    period = "" if lane == "mission" else "&period=month"
+    period = "" if lane in {"mission", "profile"} else "&period=month"
     target = f"https://{SOURCE}/{quote_plus(query)}/10/{market}?type={surface}{period}"
     endpoint = httpx.URL(MICROLINK_API_URL, params={
         "url": target, "meta": "false", "ttl": "1d", "staleTtl": "0",

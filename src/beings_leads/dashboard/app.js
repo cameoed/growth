@@ -474,7 +474,7 @@ function showToast(message, tone = "success") {
   const toast = document.createElement("div");
   toast.className = "toast";
   toast.dataset.tone = tone;
-  toast.textContent = scanTerminology(message);
+  toast.textContent = roundDollarText(scanTerminology(message));
   $("#toasts").append(toast);
   setTimeout(() => toast.remove(), tone === "error" ? 6500 : 4000);
 }
@@ -576,28 +576,29 @@ function percentage(value) {
   return `${number <= 1 ? (number * 100).toFixed(1) : number.toFixed(1)}%`;
 }
 
+const usdFormatter = new Intl.NumberFormat("en-US", {style:"currency", currency:"USD"});
+const subcentUsdFormatter = new Intl.NumberFormat("en-US", {
+  style:"currency", currency:"USD", maximumFractionDigits:6,
+});
+
 function money(value) {
   if (value == null || value === "") return "—";
   const number = Number(value);
-  return Number.isFinite(number) ? new Intl.NumberFormat("en", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(number) : "—";
+  if (!Number.isFinite(number)) return "—";
+  const formatter = number !== 0 && Math.abs(number) < 0.01
+    ? subcentUsdFormatter : usdFormatter;
+  return formatter.format(number);
 }
 
-function costMoney(value) {
-  if (value == null || value === "") return "—";
-  const number = Number(value);
-  if (!Number.isFinite(number)) return "—";
-  return new Intl.NumberFormat("en", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: number !== 0 && Math.abs(number) < 0.01 ? 6 : 2,
-  }).format(number);
+function roundDollarText(value) {
+  return String(value).replace(/\$(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?/g,
+    (_, whole, fraction) => money(whole.replaceAll(",", "") + (fraction ? `.${fraction}` : "")));
 }
 
 function maximumCostMoney(value) {
   if (value == null || value === "" || !Number.isFinite(Number(value))) return "Unknown";
   const number = Number(value);
-  return costMoney(number > 0 ? Math.ceil((number - Number.EPSILON) * 100) / 100 : number);
+  return money(number > 0 ? Math.ceil((number - Number.EPSILON) * 100) / 100 : number);
 }
 
 function costFrom(source, usdKeys = [], microKeys = [], fallback = null) {
@@ -615,7 +616,7 @@ function scanCapLabel(estimate = {}) {
     ["approved_cap_microusd", "maximum_charge_microusd", "provider_cost_microusd"],
     null,
   );
-  return cap == null ? "usage caps" : cap > 0 ? maximumCostMoney(cap) : "$0";
+  return cap == null ? "usage caps" : cap > 0 ? maximumCostMoney(cap) : "$0.00";
 }
 
 function firstValue(source, keys, fallback = 0) {
@@ -2462,6 +2463,14 @@ function settingsShell() {
             <div class="settings-actions"><button class="button" type="button" data-view="sources">Sources</button></div>
           </div>
         </section>
+        <section class="panel settings-card settings-quick-card" aria-labelledby="license-settings-title">
+          <div class="settings-body">
+            <h3 id="license-settings-title">License</h3>
+            <div class="settings-actions">
+              <a class="button" href="https://github.com/cameoed/growth/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">Product Use License ↗</a>
+            </div>
+          </div>
+        </section>
       </div>
       <section class="panel settings-card scan-readiness-card">
         <div class="panel-head"><h3>Scan readiness</h3><span class="badge" id="scan-readiness-state">${loadingIndicator("Checking…")}</span></div>
@@ -2473,7 +2482,7 @@ function settingsShell() {
           <tr class="credential-row" data-credential-service="openai"><th scope="row"><div class="credential-service"><strong>OpenAI</strong><span class="badge" id="secret-state">${loadingIndicator("Checking…")}</span></div></th><td class="credential-summary"><div class="secret-meta" id="secret-meta"></div></td><td class="credential-edit"><form id="secret-form" class="secret-form"><div class="credential-fields"><label class="field"><span>Replace key</span><input name="key" type="password" autocomplete="new-password" placeholder="Paste a new API key" required maxlength="500" /></label></div><div class="settings-actions"><button class="button primary" type="submit">Save</button><button class="button" type="button" id="remove-secret">Remove</button></div></form></td></tr>
           <tr class="credential-row" data-credential-service="openai-billing"><th scope="row"><div class="credential-service"><strong>OpenAI billing</strong><span class="badge" id="openai-billing-state">${loadingIndicator("Checking…")}</span></div></th><td class="credential-summary"><div class="secret-meta" id="openai-billing-meta"></div><a href="https://platform.openai.com/settings/organization/admin-keys" target="_blank" rel="noopener noreferrer">Create admin key ↗</a></td><td class="credential-edit"><form id="openai-billing-form" class="secret-form"><div class="credential-fields"><label class="field"><span>Admin key for Spend</span><input name="key" type="password" autocomplete="new-password" placeholder="Paste an OpenAI admin key" required maxlength="500" /></label></div><div class="settings-actions"><button class="button primary" type="submit">Save</button><button class="button" type="button" id="remove-openai-billing">Remove</button></div></form></td></tr>
           <tr class="credential-row" data-credential-service="apify"><th scope="row"><div class="credential-service"><strong>Apify</strong><span class="badge" id="apify-secret-state">${loadingIndicator("Checking…")}</span></div></th><td class="credential-summary"><div class="secret-meta" id="apify-secret-meta"></div></td><td class="credential-edit"><form id="apify-secret-form" class="secret-form"><div class="credential-fields"><label class="field"><span>Replace token</span><input name="key" type="password" autocomplete="new-password" placeholder="Paste an Apify API token" required maxlength="500" /></label></div><div class="settings-actions"><button class="button primary" type="submit">Save</button><button class="button" type="button" id="remove-apify-secret">Remove</button></div></form></td></tr>
-          <tr class="credential-row" data-credential-service="dataforseo"><th scope="row"><div class="credential-service"><strong>DataForSEO</strong><span class="badge" id="dataforseo-secret-state">${loadingIndicator("Checking…")}</span></div></th><td class="credential-summary"><div class="secret-meta" id="dataforseo-secret-meta"></div></td><td class="credential-edit"><form id="dataforseo-secret-form" class="secret-form"><div class="credential-fields"><label class="field"><span>API login</span><input name="login" type="password" autocomplete="off" placeholder="DataForSEO API login" required maxlength="320" /></label><label class="field"><span>API password</span><input name="password" type="password" autocomplete="new-password" placeholder="DataForSEO API password" aria-describedby="dataforseo-trial-note" required maxlength="500" /><small id="dataforseo-trial-note">$1 free usage for new accounts</small></label></div><div class="settings-actions"><button class="button primary" type="submit">Save</button><button class="button" type="button" id="remove-dataforseo-secret">Remove</button></div></form></td></tr>
+          <tr class="credential-row" data-credential-service="dataforseo"><th scope="row"><div class="credential-service"><strong>DataForSEO</strong><span class="badge" id="dataforseo-secret-state">${loadingIndicator("Checking…")}</span></div></th><td class="credential-summary"><div class="secret-meta" id="dataforseo-secret-meta"></div></td><td class="credential-edit"><form id="dataforseo-secret-form" class="secret-form"><div class="credential-fields"><label class="field"><span>API login</span><input name="login" type="password" autocomplete="off" placeholder="DataForSEO API login" required maxlength="320" /></label><label class="field"><span>API password</span><input name="password" type="password" autocomplete="new-password" placeholder="DataForSEO API password" aria-describedby="dataforseo-trial-note" required maxlength="500" /><small id="dataforseo-trial-note">$1.00 free usage for new accounts</small></label></div><div class="settings-actions"><button class="button primary" type="submit">Save</button><button class="button" type="button" id="remove-dataforseo-secret">Remove</button></div></form></td></tr>
           <tr class="credential-row" data-credential-service="microlink"><th scope="row"><div class="credential-service"><strong>Microlink</strong><span class="badge" id="microlink-secret-state">${loadingIndicator("Checking…")}</span></div></th><td class="credential-summary"><div class="secret-meta" id="microlink-secret-meta"></div></td><td class="credential-edit"><form id="microlink-secret-form" class="secret-form"><div class="credential-fields"><label class="field"><span>Replace key</span><input name="key" type="password" autocomplete="new-password" placeholder="Paste a Microlink API key" required maxlength="500" /></label></div><div class="settings-actions"><button class="button primary" type="submit">Save</button><button class="button" type="button" id="remove-microlink-secret">Remove</button></div></form></td></tr>
           <tr class="credential-row" data-credential-service="treg"><th scope="row"><div class="credential-service"><strong>Treg</strong><span class="badge" id="people-hydration-state">${loadingIndicator("Checking…")}</span></div></th><td class="credential-summary"><span class="muted">Existing CLI login or saved token</span></td><td class="credential-edit"><div class="credential-manage"><button class="button" type="button" id="open-treg-settings">Manage Treg</button></div></td></tr>
         </tbody></table>
@@ -2627,7 +2636,7 @@ async function loadScanReadiness({checkTregHealth = true} = {}) {
     api("/api/settings/treg/health").then(health => {
       if (generation !== scanReadinessGeneration) return;
       data.treg = {...data.treg, ...health,
-        detail: health.balance_microusd !== undefined ? `Balance $${(health.balance_microusd / 1000000).toFixed(4)} · ${health.role || "member"}` : health.status};
+        detail: health.balance_microusd !== undefined ? `Balance ${spendMoney(health.balance_microusd)} · ${health.role || "member"}` : health.status};
       renderScanReadiness();
     }).catch(() => {});
   }
@@ -2683,12 +2692,12 @@ function renderBuyerIntelligence(data) {
   if (!root) return;
   buyerIntelligenceStatus = data;
   setScanControlsLocked($("#buyer-intelligence-form"), buyerIntelligencePending || ["running", "cancel_requested"].includes(data.status));
-  const dollars = (data.maximum_microusd / 1000000).toFixed(4);
+  const dollars = maximumCostMoney(data.maximum_microusd / 1_000_000);
   const records = (data.receipts || []).reduce((sum, row) => sum + Number(row.records || 0), 0);
   root.replaceChildren();
   const line = document.createElement("p");
   line.className = "form-note";
-  line.textContent = `${data.companies} companies · ${data.requests_maximum} requests max · $${dollars} max · ${data.status}${data.status === "quoted" ? "" : ` · ${records} records`}`;
+  line.textContent = `${data.companies} companies · ${data.requests_maximum} requests max · ${dollars} max · ${data.status}${data.status === "quoted" ? "" : ` · ${records} records`}`;
   root.append(line);
   if (["running", "cancel_requested"].includes(data.status)) {
     const cancel = document.createElement("button");
@@ -2713,7 +2722,7 @@ function renderBuyerIntelligence(data) {
   if (data.status === "quoted" && data.requests_maximum) {
     const button = document.createElement("button");
     button.className = "button primary";
-    button.textContent = `Start · $${dollars} max`;
+    button.textContent = `Start · ${dollars} max`;
     button.disabled = buyerIntelligencePending;
     button.addEventListener("click", async () => {
       if (scanActionBlocked(button) || buyerIntelligencePending || buyerIntelligenceStatus?.id !== data.id) return;
@@ -2991,7 +3000,7 @@ function renderPeopleHydration(data = state.peopleHydration) {
     const percent = total ? Math.min(100, 100 * processed / total) : Number(run.progress_percent || 0);
     runRoot.innerHTML = `<div class="people-run-head"><strong>${escapeHtml(run.message || humanize(run.status))}</strong><span class="badge ${run.status === "complete" ? "moss" : run.status === "failed" ? "warn" : ""}">${escapeHtml(humanize(run.status))}</span></div>
       <div class="people-run-progress"><i style="width:${percent}%"></i></div>
-      <p>${formatNumber(processed)} / ${formatNumber(total)} companies · ${formatNumber(run.people_found || 0)} people · ${formatNumber(run.completed_companies || 0)} held 90d · ${formatNumber(run.verified_emails || 0)} verified work emails · ${run.cost_unknown ? "Unknown actual cost" : `${costMoney(run.actual_cost_usd || 0)} actual`}</p>
+      <p>${formatNumber(processed)} / ${formatNumber(total)} companies · ${formatNumber(run.people_found || 0)} people · ${formatNumber(run.completed_companies || 0)} held 90d · ${formatNumber(run.verified_emails || 0)} verified work emails · ${run.cost_unknown ? "Unknown actual cost" : `${money(run.actual_cost_usd || 0)} actual`}</p>
       ${run.current_company ? `<small>Now: ${escapeHtml(run.current_company)}</small>` : ""}`;
   } else {
     runRoot.replaceChildren();
@@ -3571,6 +3580,47 @@ function scheduleSmartScanPaidEstimate() {
   }, 350);
 }
 
+function renderScanLauncherStatus(scan = state.smartScan || {}) {
+  const shell = $("#smart-scan-shell");
+  if (!shell) return;
+  const launcher = $("#scan-launch-trigger", shell);
+  const initial = shell.dataset.initialLoading === "true";
+  const summary = state.scanOverview?.smart;
+  const smart = summary && (initial || Date.parse(summary.updated_at) > Date.parse(scan.updated_at))
+    ? summary : scan;
+  const starting = smartScanInitializing(smart);
+  const active = !smart.cleaning_up && (starting || smartScanBusy(smart));
+  const paused = smart.status === "paused" || smart.control_status === "paused";
+  const rows = scanOverviewItems();
+  const source = (scan.external_source_runs ?? state.scanOverview?.methods)?.[0];
+  const standalone = rows.find(row => !row.parent && ACTIVE_RUN_STATES.has(row.status));
+  const microlink = state.microlinkScanActive ? state.microlinkOverview : null;
+  const label = starting ? "Starting Smart Scan…"
+    : active ? paused ? "Smart Scan paused" : "Smart Scan is running..."
+    : microlink ? `${microlink.label} is running…`
+    : standalone ? `${standalone.label} is running…`
+    : source ? `${source.method_label || humanize(source.method || "Public-source scan")} is running…` : "";
+  const waiting = !label && (initial || state.smartScanLoading
+    || shell.dataset.microlinkStatusPending === "true" || shell.dataset.overviewPending === "true");
+  const unavailable = waiting && shell.dataset.scanStatusUnavailable === "true";
+  launcher.dataset.running = String(Boolean(label));
+  const text = label || (waiting ? unavailable ? "Scan status unavailable" : "Checking scan status…" : "Smart Scan");
+  if (launcher.textContent !== text) launcher.textContent = text;
+  launcher.disabled = waiting || Boolean(label) || Boolean(scanLaunchConflict("smart", scan));
+  if (state.openSmartScanWhenReady && state.activeView === "smart_scan" && (!waiting || unavailable)) {
+    state.openSmartScanWhenReady = false;
+    if (!launcher.disabled && !$("#smart-scan-options-dialog")?.open) launcher.click();
+  }
+  shell.dataset.launchStatusPending = String(waiting);
+  if (initial) {
+    $("#smart-scan-run-controls", shell).hidden = !active;
+    const pauseResume = $("#pause-resume-smart-scan", shell);
+    pauseResume.textContent = paused ? "Resume" : "Pause";
+    pauseResume.disabled = true;
+    $("#stop-smart-scan", shell).disabled = true;
+  }
+}
+
 function updateSmartScanLaunchControls(scan = state.smartScan || {}) {
   syncDiscoveryProviderChoices(scan);
   const profile = scan.profile || {};
@@ -3834,10 +3884,10 @@ function updateSmartScanLaunchControls(scan = state.smartScan || {}) {
     const adsDue = adsQuote?.due;
     const checkingAds = adsEnabled && !adsFrozen && validAds && paidChecking && !adsQuote;
     showEstimateStatus(adsCost, adsFrozen
-      ? `Actual ${costMoney(Number(scan.actual_paid_ads_cost_usd || 0))} · Max ${costMoney(Number(scan.paid_ads_max_usd || 0))}`
+      ? `Actual ${money(Number(scan.actual_paid_ads_cost_usd || 0))} · Max ${money(Number(scan.paid_ads_max_usd || 0))}`
       : !validAds ? "Check the company limit and spend cap"
-      : checkingAds ? `Max ${costMoney(adsEstimate)} · ${pendingLabel}`
-      : `Max ${costMoney(adsEstimate)}${adsDue == null ? "" : ` · ${formatNumber(adsDue)} due`}`, checkingAds);
+      : checkingAds ? `Max ${money(adsEstimate)} · ${pendingLabel}`
+      : `Max ${money(adsEstimate)}${adsDue == null ? "" : ` · ${formatNumber(adsDue)} due`}`, checkingAds);
   }
 
   const unpricedUsage = active ? Boolean(scan.has_unpriced_provider_usage)
@@ -3864,10 +3914,10 @@ function updateSmartScanLaunchControls(scan = state.smartScan || {}) {
         ? estimatingCostLabel
         : "Scan";
   if (!button.disabled) {
-    const costText = unpricedUsage ? `Known ${costMoney(estimate)} + usage caps`
-      : estimate === 0 ? "$0"
-      : state.smartScanAdsEnabled && estimate === adsEstimate ? `Up to ${costMoney(estimate)}`
-      : `Est. ${costMoney(estimate)}${state.smartScanAdsEnabled ? " incl. ad cap" : ""}`;
+    const costText = unpricedUsage ? `Known ${money(estimate)} + usage caps`
+      : estimate === 0 ? "$0.00"
+      : state.smartScanAdsEnabled && estimate === adsEstimate ? `Up to ${money(estimate)}`
+      : `Est. ${money(estimate)}${state.smartScanAdsEnabled ? " incl. ad cap" : ""}`;
     launchLabel += ` · ${costText}`;
   }
   button.setAttribute("aria-busy", String(Boolean(state.smartScanLoading || state.smartScanStarting || scan.preparing || paidChecking)));
@@ -3877,18 +3927,14 @@ function updateSmartScanLaunchControls(scan = state.smartScan || {}) {
     const smartConflict = scanLaunchConflict("smart", scan);
     const microlinkLocked = Boolean(scanLaunchConflict("microlink", scan));
     const importLocked = (!scan.cleaning_up && state.smartScanLoading) || Boolean(scanLaunchConflict("import", scan));
-    launcher.disabled = Boolean(smartConflict);
-    const initializing = smartScanInitializing(scan);
-    const running = initializing || smartConflict === "Smart Scan is active.";
-    launcher.setAttribute("data-running", String(running));
-    const launcherLabel = initializing ? "Starting Smart Scan…" : running ? "Smart Scan is running..." : "Smart Scan";
-    if (launcher.textContent !== launcherLabel) launcher.textContent = launcherLabel;
+    renderScanLauncherStatus(scan);
+    const running = launcher.dataset.running === "true";
     shell?.querySelectorAll?.('[data-scan-setup="discovery"], [data-scan-setup="contacts"]').forEach(control => {
       control.disabled = microlinkLocked;
     });
     const launchNote = $("#scan-launch-lock");
-    const launchMessage = scan.cleaning_up && !importLocked
-      ? "Smart Scan is finishing cleanup. Import can still save companies."
+    const launchMessage = shell?.dataset.launchStatusPending === "true" ? ""
+      : scan.cleaning_up && !importLocked ? "Smart Scan is finishing cleanup. Import can still save companies."
       : running ? "" : smartConflict;
     launchNote.hidden = !launchMessage;
     if (launchNote.textContent !== launchMessage) launchNote.textContent = launchMessage;
@@ -3896,7 +3942,7 @@ function updateSmartScanLaunchControls(scan = state.smartScan || {}) {
     const importSubmit = $("#start-import-scan");
     if (importSubmit) {
       importSubmit.disabled = importLocked;
-      if (!state.importScanStarting) importSubmit.textContent = scan.cleaning_up ? "Import companies" : "Import and scan · $0";
+      if (!state.importScanStarting) importSubmit.textContent = scan.cleaning_up ? "Import companies" : "Import and scan · $0.00";
     }
     const retry = $("#retry-scan-inventory");
     retry.hidden = !scan.inventory_error || active;
@@ -3910,14 +3956,14 @@ function updateSmartScanLaunchControls(scan = state.smartScan || {}) {
       ? "Add an OpenAI key in Settings"
       : state.smartScanAIEnabled && validLimit
         ? checkingAI ? pendingLabel
-          : `Estimated reviews ${costMoney(reviewAIEstimate)}${aiQuote ? ` · ${formatNumber(aiQuote.reused)} reused · ${formatNumber(aiQuote.due)} due` : ""}`
+          : `Estimated reviews ${money(reviewAIEstimate)}${aiQuote ? ` · ${formatNumber(aiQuote.reused)} reused · ${formatNumber(aiQuote.due)} due` : ""}`
         : "Check the site limit", checkingAI);
   }
   const sourceAILabel = $("#smart-scan-source-ai-estimate");
   if (sourceAILabel) {
     const checkingSource = paidChecking && selectedSourceAI() && !sourceQuote;
     sourceAILabel.hidden = !openAIConfigured || (!checkingSource && sourceAIEstimate <= 0);
-    showEstimateStatus(sourceAILabel, checkingSource ? pendingLabel : `Source AI est. ${costMoney(sourceAIEstimate)}`, checkingSource);
+    showEstimateStatus(sourceAILabel, checkingSource ? pendingLabel : `Source AI est. ${money(sourceAIEstimate)}`, checkingSource);
   }
   const microlinkCost = $("#smart-scan-microlink-cost");
   if (microlinkCost) {
@@ -3930,12 +3976,12 @@ function updateSmartScanLaunchControls(scan = state.smartScan || {}) {
     if (active && !scan.preparing && scan.dataforseo_enabled) {
       const {detailLimit} = smartScanSEOLimits(profile, rawSEOLimit);
       const detailCap = Number(scan.dataforseo_detail_limit || scan.counters?.dataforseo_detail_cap || detailLimit);
-      showEstimateStatus(seoEstimateLabel, `Actual ${costMoney(Number(scan.actual_dataforseo_cost_usd || 0))} · est. ${costMoney(smartScanSEOEstimate(scan))} · ${formatNumber(rawSEOLimit)} bulk + ${formatNumber(detailCap)} detail`);
+      showEstimateStatus(seoEstimateLabel, `Actual ${money(Number(scan.actual_dataforseo_cost_usd || 0))} · est. ${money(smartScanSEOEstimate(scan))} · ${formatNumber(rawSEOLimit)} bulk + ${formatNumber(detailCap)} detail`);
     } else {
       const checkingSEO = validSEOLimit && paidChecking && !seoQuote;
       showEstimateStatus(seoEstimateLabel, !validSEOLimit ? "Check the site limit"
         : checkingSEO ? pendingLabel
-        : `Estimated SEO total ${costMoney(seoQuote?.estimate_usd ?? seoEstimate)}${seoQuote ? ` · ${formatNumber(seoQuote.reused)} reused · ${formatNumber(seoQuote.bulk_due)} bulk + ${formatNumber(seoQuote.detail_due)} detail due` : ""}`, checkingSEO);
+        : `Estimated SEO total ${money(seoQuote?.estimate_usd ?? seoEstimate)}${seoQuote ? ` · ${formatNumber(seoQuote.reused)} reused · ${formatNumber(seoQuote.bulk_due)} bulk + ${formatNumber(seoQuote.detail_due)} detail due` : ""}`, checkingSEO);
     }
   }
   const peopleScope = $("#smart-scan-people-scope");
@@ -3951,7 +3997,7 @@ function updateSmartScanLaunchControls(scan = state.smartScan || {}) {
       ? scan.inventory_error ? "Coverage unavailable" : "Checking coverage…"
       : !peopleEnabled ? ""
       : frozenPeople
-        ? `Actual ${scan.people_hydration?.cost_unknown ? "Unknown" : costMoney(peopleActual)} · est. ${costMoney(peopleEstimate)} · ${formatNumber(scan.counters?.people_hydration_due || peopleDue)} due`
+        ? `Actual ${scan.people_hydration?.cost_unknown ? "Unknown" : money(peopleActual)} · est. ${money(peopleEstimate)} · ${formatNumber(scan.counters?.people_hydration_due || peopleDue)} due`
       : !validPeopleLimit ? "Check the company limit"
       : checkingPeople ? pendingLabel
       : `Estimated people ${maximumCostMoney(peopleQuote?.estimate_usd ?? peopleLaunchEstimate)} · ${formatNumber(peopleQuote?.reused || 0)} reused · ${formatNumber(peopleDue)} due`, checkingPeople);
@@ -3964,7 +4010,7 @@ function smartScanContentMarkup() {
     <div class="panel smart-scan-controls" id="smart-scan-controls">
     <div class="smart-scan-head">
       <button class="button smart-scan-button" id="scan-launch-trigger" type="button" data-scan-setup="smart" data-verbatim
-        aria-haspopup="dialog" aria-controls="smart-scan-options-dialog" disabled>Smart Scan</button>
+        aria-haspopup="dialog" aria-controls="smart-scan-options-dialog" disabled>Checking scan status…</button>
       <div class="smart-scan-run-controls" id="smart-scan-run-controls" hidden>
         <button class="button" id="pause-resume-smart-scan" type="button" value="pause">Pause</button>
         <button class="button danger" id="stop-smart-scan" type="button">Stop</button>
@@ -4207,7 +4253,7 @@ function smartScanContentMarkup() {
 }
 
 function smartScanShellMarkup() {
-  return `<section class="smart-scan-shell" id="smart-scan-shell" aria-label="Smart Scan" aria-busy="true" data-initial-loading="true">
+  return `<section class="smart-scan-shell" id="smart-scan-shell" aria-label="Smart Scan" aria-busy="true" data-initial-loading="true" data-launch-status-pending="true" data-microlink-status-pending="true" data-overview-pending="true">
     ${smartScanContentMarkup()}
   </section>`;
 }
@@ -4891,7 +4937,7 @@ function smartScanTerminalLine(event = {}) {
   const glyph = event.level === "error" ? "!" : event.level === "success" ? "✓" : event.level === "item" ? "↳" : "›";
   const results = (event.results || []).map(({label, summary}) =>
     `<small class="smart-terminal-result"><b>${escapeHtml(label)}</b> · ${escapeHtml(summary)}</small>`).join("");
-  return `<div class="smart-terminal-line level-${escapeHtml(event.level || "info")}" data-activity-time="${timestamp}"><time>${escapeHtml(time)}</time><span class="terminal-glyph">${glyph}</span><p><strong>${escapeHtml(event.message || "Update")}</strong>${event.detail ? `<small>${escapeHtml(event.detail)}</small>` : ""}${event.query ? `<small data-verbatim>${escapeHtml(event.query)}</small>` : ""}${results}</p></div>`;
+  return `<div class="smart-terminal-line level-${escapeHtml(event.level || "info")}" data-activity-time="${timestamp}"><time>${escapeHtml(time)}</time><span class="terminal-glyph">${glyph}</span><p><strong>${escapeHtml(roundDollarText(event.message || "Update"))}</strong>${event.detail ? `<small>${escapeHtml(roundDollarText(event.detail))}</small>` : ""}${event.query ? `<small data-verbatim>${escapeHtml(event.query)}</small>` : ""}${results}</p></div>`;
 }
 
 async function copySmartScanErrors() {
@@ -4981,6 +5027,9 @@ async function clearSmartScan() {
       || state.smartScanControlPending || state.smartScanStarting
       || !["complete", "partial", "failed", "stopped"].includes(previous.status)) return;
   state.smartScanControlPending = true;
+  const shell = $("#smart-scan-shell");
+  if (shell) delete shell.dataset.scanStatusUnavailable;
+  renderScanLauncherStatus();
   const generation = ++smartScanLoadGeneration;
   clearTimeout(state.smartScanPollTimer);
   smartScanInventoryRequest = null;
@@ -5083,6 +5132,8 @@ async function loadSmartScan() {
       clearLoadingIndicators("#smart-scan-shell");
       $("#smart-scan-shell")?.setAttribute("aria-busy", "false");
       if (shell.dataset.initialLoading === "true") {
+        shell.dataset.scanStatusUnavailable = "true";
+        renderScanLauncherStatus();
         $(".smart-scan-summary", shell)?.setAttribute("aria-busy", "false");
         $("#smart-scan-phase-label", shell).textContent = "Scan status unavailable";
         $("#smart-scan-due-note", shell).textContent = "Inventory unavailable";
@@ -5246,7 +5297,7 @@ function scanMethodsShell() {
     <section ${discoveryPanelAttributes("web_ct")}>
     <div class="web-scan-layout">
       <form class="panel web-scan-builder" id="web-scan-form">
-        <div class="panel-head"><div class="scan-card-title"><h3>Web &amp; CT scan</h3>${scanCardHelp("web-ct", "Web & CT", SCAN_METHOD_HELP.web_ct)}</div><span class="badge moss">Public retrieval $0</span></div>
+        <div class="panel-head"><div class="scan-card-title"><h3>Web &amp; CT scan</h3>${scanCardHelp("web-ct", "Web & CT", SCAN_METHOD_HELP.web_ct)}</div><span class="badge moss">Public retrieval $0.00</span></div>
         <div class="web-scan-body">
           <div class="web-scan-fields">
             <label class="field"><span>Max hostnames per source</span><input name="max_hosts_per_source" type="number" min="1" max="10000" value="10000" required /></label>
@@ -5497,7 +5548,7 @@ function bindMicrolinkScanBar(root) {
 
   function monitor(kind) {
     const endpoint = `/api/microlink-${kind}`;
-    const lane = {kind, result: {status: "idle"}, pending: false, reconnecting: false};
+    const lane = {kind, result: {status: "idle"}, pending: false, reconnecting: false, statusChecked: false};
     lanes.set(kind, lane);
     let timer;
     let revision = 0;
@@ -5536,6 +5587,9 @@ function bindMicrolinkScanBar(root) {
         if (active(lane.result) || state.activeView === "smart_scan") schedule(3000);
       } finally {
         reading = false;
+        lane.statusChecked = true;
+        if ([...lanes.values()].every(item => item.statusChecked)) delete root.dataset.microlinkStatusPending;
+        renderScanLauncherStatus();
       }
     }
     root.addEventListener("microlink-refresh", refresh);
@@ -6149,8 +6203,10 @@ function smartScanViewShell() {
         <div id="import-scan-result" role="status" aria-live="polite"></div>
         <div id="import-scan-progress" role="status" aria-live="polite"></div>
       </div>
-      <footer class="paid-form-actions"><button class="button" type="button" id="cancel-import-scan">Cancel</button><button class="button primary" type="submit" id="start-import-scan">Import and scan · $0</button></footer>
+      <footer class="paid-form-actions"><button class="button" type="button" id="cancel-import-scan">Cancel</button><button class="button primary" type="submit" id="start-import-scan">Import and scan · $0.00</button></footer>
     </form></dialog>`;
+  renderScanLauncherStatus();
+  void pollScanStatus();
   installScanPaneDivider($("#smart-scan-shell"));
   $("#cancel-import-scan").addEventListener("click", () => setScanImportMode(false));
   $("#import-scan-form").addEventListener("submit", startImportScan);
@@ -6594,7 +6650,7 @@ function renderDiscoveryMethodEstimate(tabId, error = "") {
   const unpriced = estimate.has_unpriced_provider_usage || estimate.provider_cost_usd == null;
   const knownMaximum = Number(estimate.known_provider_cost_usd || 0);
   const costBadge = unpriced ? "Provider usage caps" : Number(estimate.provider_cost_usd) > 0
-    ? maximumCostMoney(estimate.provider_cost_usd) + " max" : "$0 provider spend";
+    ? maximumCostMoney(estimate.provider_cost_usd) + " max" : "$0.00 provider spend";
   const runnable = estimate.runnable !== false && blockers.length === 0;
   const activeRunBlocksStart = tabId !== "company_intelligence" && Boolean(activeDiscoveryRunForTab(discoveryTabs().find(tab => tab.id === tabId)));
   root.innerHTML = `<div class="panel-head"><h3>Bounded estimate</h3><span class="badge ${usesOpenAI ? "" : "moss"}">${escapeHtml(costBadge)}</span></div><div class="discovery-method-estimate-body">
@@ -7005,9 +7061,6 @@ function renderStandaloneScanWorkspace(rows) {
     <p class="standalone-scan-current" role="status">${escapeHtml(phase)}</p>
     ${total ? `<p class="smart-scan-note">${formatNumber(done)} / ${formatNumber(Math.max(total, done))} items processed</p>` : ""}`;
   if (panel.innerHTML !== markup) panel.innerHTML = markup;
-  const launch = $("#scan-launch-trigger", root);
-  launch.textContent = busy ? `${label} is running…` : "Smart Scan";
-  launch.dataset.running = String(busy);
   const errors = Array.isArray(run.errors) ? run.errors : run.error ? [run.error] : [];
   const events = Array.isArray(run.events) ? run.events : Array.isArray(run.logs) ? run.logs : [];
   const selected = state.smartScanTerminalTab === "errors" ? errors : events;
@@ -7059,6 +7112,7 @@ function scanOverviewPills(rows, focused = null) {
 function renderAggregateScanState() {
   const rows = scanOverviewItems();
   renderStandaloneScanWorkspace(rows);
+  renderScanLauncherStatus();
   const active = rows.filter(row => ACTIVE_RUN_STATES.has(row.status) || (row.parent && smartScanActive(row.run)));
   const root = $("#scan-state");
   if (root) {
@@ -7224,19 +7278,19 @@ function renderAdDiscoveryQuote() {
   root.innerHTML = `
     <div class="panel-head"><div><h3>Cost estimate</h3><span class="section-meta">${estimate.expires_at ? `Expires ${escapeHtml(relativeTime(estimate.expires_at))}` : "Short-lived quote"}</span></div><span class="badge ${runnable ? "moss" : "warn"}">${runnable ? "Ready to approve" : !adDiscoveryTokenConfigured() ? "Token required" : cap == null ? "Cap unavailable" : "Scan active"}</span></div>
     <div class="paid-quote-body">
-      <div class="paid-cost-total"><span>Provider hard cap</span><strong>${maximumCostMoney(cap)}</strong><small>Estimated known charge ${costMoney(known)}${estimate.budget_limited ? " · limited by your budget" : ""}</small></div>
+      <div class="paid-cost-total"><span>Provider hard cap</span><strong>${maximumCostMoney(cap)}</strong><small>Estimated known charge ${money(known)}${estimate.budget_limited ? " · limited by your budget" : ""}</small></div>
       <details><summary>Cost breakdown</summary><div class="paid-cost-breakdown">${lineItems.length ? lineItems.map(item => {
         const itemCost = costFrom(item, ["known_cost_usd", "result_cost_usd", "maximum_cost_usd", "cost_usd"], ["cost_microusd"], 0);
         const results = firstValue(item, ["conservative_max_results", "nominal_max_results", "max_results", "quantity"], null);
         const details = [item.actor_runs != null ? `${formatNumber(item.actor_runs)} actor scan${Number(item.actor_runs) === 1 ? "" : "s"}` : "", results == null ? "" : `up to ${formatNumber(results)} results`].filter(Boolean).join(" · ");
         const label = item.kind || item.stage || item.label || item.surface || "Provider work";
         const surface = item.kind && item.surface ? `${humanize(item.surface)} · ` : "";
-        return `<div><span><strong>${escapeHtml(humanize(label))}</strong>${details ? `<small>${escapeHtml(surface + details)}</small>` : ""}</span><b>${costMoney(itemCost)}</b></div>`;
+        return `<div><span><strong>${escapeHtml(humanize(label))}</strong>${details ? `<small>${escapeHtml(surface + details)}</small>` : ""}</span><b>${money(itemCost)}</b></div>`;
       }).join("") : `<div><span><strong>Bounded provider work</strong><small>The server will enforce the approved total.</small></span><b>${maximumCostMoney(cap)}</b></div>`}</div>
       </details>
       ${(warnings.length || !runnable) ? `<ul class="paid-warnings">${!runnable ? `<li>Add an Apify token in Settings before scanning.</li>` : ""}${warnings.map(item => `<li>${escapeHtml(typeof item === "string" ? item : item.message || JSON.stringify(item))}</li>`).join("")}</ul>` : ""}
       <label class="paid-confirmation"><input id="approve-paid-cap" type="checkbox" ${runnable ? "" : "disabled"} /><span>I approve a maximum provider charge of <strong>${maximumCostMoney(cap)}</strong> for this manual scan.</span></label>
-      <button class="button primary paid-run-button" id="start-paid-discovery" type="button" disabled>Scan · ${costMoney(known)} est. · ${maximumCostMoney(cap)} max</button>
+      <button class="button primary paid-run-button" id="start-paid-discovery" type="button" disabled>Scan · ${money(known)} est. · ${maximumCostMoney(cap)} max</button>
     </div>`;
   const approval = $("#approve-paid-cap");
   const runButton = $("#start-paid-discovery");
@@ -7334,7 +7388,7 @@ function renderAdDiscoveryRun() {
         <span><strong>${formatNumber(firstValue(progress, ["links_verified"], 0))}</strong> verified domains</span>
         <span><strong>${formatNumber(firstValue(progress, ["candidates_promoted"], 0))}</strong> candidates</span>
         <span><strong>${formatNumber(firstValue(progress, ["creatives_found"], 0))}</strong> creatives</span>
-        <span><strong>${actual == null ? "Unknown" : costMoney(actual)}</strong> / ${maximumCostMoney(cap)} cap</span>
+        <span><strong>${actual == null ? "Unknown" : money(actual)}</strong> / ${maximumCostMoney(cap)} cap</span>
       </div>
       ${run.message ? `<p class="paid-run-message">${escapeHtml(run.message)}</p>` : ""}
       ${error ? `<p class="paid-run-error">${escapeHtml(error)}</p>` : ""}
@@ -7531,7 +7585,7 @@ function renderResearch(data) {
   const pool = data.strategy_pool || {};
   const contract = data.operating_contract || {};
   $("#research-cycle").textContent = `Cycle ${data.cycle} · ${new Date(data.generated_at).toLocaleDateString()}`;
-  $("#research-contract").innerHTML = `<strong>Primary cohort</strong><span>${escapeHtml(contract.primary_cohort || "Paid-growth consumer and digital buyers")}</span><small>${escapeHtml(contract.referral_cohort || "Referral partners")} · ${escapeHtml(contract.offer || "$5,000/month")} · ${escapeHtml(contract.automation_threshold || "20 scan calls and 3 renewal decisions")}</small>`;
+  $("#research-contract").innerHTML = `<strong>Primary cohort</strong><span>${escapeHtml(contract.primary_cohort || "Paid-growth consumer and digital buyers")}</span><small>${escapeHtml(contract.referral_cohort || "Referral partners")} · ${escapeHtml(roundDollarText(contract.offer || "$5,000/month"))} · ${escapeHtml(contract.automation_threshold || "20 scan calls and 3 renewal decisions")}</small>`;
   $("#research-summary").innerHTML = `<div><small>Focus</small><strong>${escapeHtml(focus.segment || "—")}</strong></div><div><small>Strategy variants</small><strong>${formatNumber(pool.combinations)}</strong></div><div><small>Source lenses</small><strong>${formatNumber(pool.source_lenses)}</strong></div><div><small>Daily missions</small><strong>${formatNumber(missions.length)}</strong></div><div><small>Free methods</small><strong>${formatNumber(methods.length)}</strong></div><div><small>Source probes</small><strong>${formatNumber(probes.length)}</strong></div>`;
   $("#mission-list").innerHTML = missions.length ? missions.map((mission, index) => `<article class="mission-card">
     <header><span>${String(index + 1).padStart(2, "0")}</span><div><h4>${escapeHtml(mission.name)}</h4><small>${escapeHtml(mission.segment)} · ${escapeHtml(mission.region || "Global")}</small><small class="mission-variant">${escapeHtml(humanize(mission.relationship_type || "buyer"))} · ${escapeHtml(mission.proof_mode || "Public proof")} · ${escapeHtml(mission.recency || "Current")}</small></div></header>
@@ -7846,9 +7900,14 @@ async function pollScanStatus() {
     const previous = state.scanStatus;
     state.scanStatus = status.status;
     state.webScanStatus = status;
+    const shell = $("#smart-scan-shell");
+    if (shell) {
+      delete shell.dataset.overviewPending;
+      if (shell.dataset.initialLoading !== "true") delete shell.dataset.scanStatusUnavailable;
+    }
     renderImportScanProgress();
     state.scanOverview = status.scan_overview || null;
-    if (state.smartScan) {
+    if (state.smartScan && $("#smart-scan-shell")?.dataset.initialLoading !== "true") {
       state.smartScan.external_source_runs = status.scan_overview?.methods || [];
       renderSmartScan(state.smartScan);
     }
@@ -7865,6 +7924,11 @@ async function pollScanStatus() {
     }
     if (status.status === "failed" && previous !== "failed") showToast(status.message || "Scan failed", "error");
   } catch {
+    const shell = $("#smart-scan-shell");
+    if (shell?.dataset.overviewPending === "true") {
+      shell.dataset.scanStatusUnavailable = "true";
+      renderScanLauncherStatus();
+    }
     state.scanPollTimer = setTimeout(pollScanStatus, 4000);
   } finally {
     state.scanPollInFlight = false;
@@ -8003,19 +8067,17 @@ function outboundShell() {
     finally {control.disabled = false;}
   });
 }
-function outboundLookupActions(row) {
+function outboundPhoneLookup(row) {
   return contactLookupActions({...row, prospect_key:row.person_key}, {
     ...row, email_lookup:state.scanReadiness?.treg,
-  });
+  }).phone || '<span class="muted">—</span>';
 }
 function syncOutboundLookupActions() {
   if (state.activeView !== "prospects") return;
   for (const control of $$("[data-outbound-lookup]")) {
     const row = outboundData?.items.find(item => item.id === Number(control.dataset.outboundLookup));
     if (!row) continue;
-    const kind = control.dataset.lookupKind;
-    const markup = outboundLookupActions(row)[kind];
-    control.innerHTML = markup || (kind === "phone" ? '<span class="muted">—</span>' : "");
+    control.innerHTML = outboundPhoneLookup(row);
   }
 }
 async function loadOutboundProspects() {
@@ -8033,7 +8095,6 @@ async function loadOutboundProspects() {
     $("#outbound-total").textContent = formatNumber(data.total);
     $("#outbound-message").textContent = "";
     $("#outbound-rows").innerHTML = data.items.map(row => {
-      const lookup = outboundLookupActions(row);
       return `<tr class="outbound-row">
       <td><div class="outbound-person">
         <div class="outbound-identity"><strong>${escapeHtml(row.name)}</strong>${row.title ? `<small>${escapeHtml(row.title)}</small>` : ""}</div>
@@ -8044,14 +8105,13 @@ async function loadOutboundProspects() {
           </button>
         </div>
       </div></td>
-      <td class="outbound-company"><a href="#sales" data-outbound-company="${row.candidate_id}" data-company-key="${escapeHtml(row.company_key)}">${escapeHtml(row.company_name)}</a><small>${escapeHtml(row.company_key)}</small></td>
+      <td class="outbound-company"><a href="#sales" data-outbound-company="${row.candidate_id}" data-company-key="${escapeHtml(row.company_key)}">${escapeHtml(String(row.company_name ?? "").replaceAll("&amp;", "&"))}</a><small>${escapeHtml(row.company_key)}</small></td>
       <td><div class="outbound-contact">
         ${row.email ? `<div class="outbound-contact-line outbound-email-line"><button type="button" class="text-button" data-copy-email="${escapeHtml(row.email)}" aria-label="Copy ${escapeHtml(row.email)}">${escapeHtml(row.email)}</button></div>` : ""}
         ${/^https?:\/\//i.test(row.profile_url || "") ? `<div class="outbound-contact-line"><a href="${escapeHtml(row.profile_url)}" target="_blank" rel="noopener noreferrer">Profile ↗</a></div>` : ""}
         ${!row.email && !row.profile_url ? '<span class="muted">—</span>' : ""}
-        <div class="outbound-contact-line" data-outbound-lookup="${row.id}" data-lookup-kind="ai">${lookup.ai}</div>
       </div></td>
-      <td class="outbound-phone">${safeTel(row.phone) ? `<a href="${escapeHtml(safeTel(row.phone))}">${escapeHtml(formatPhoneNumber(row.phone))}</a>` : `<div data-outbound-lookup="${row.id}" data-lookup-kind="phone">${lookup.phone || '<span class="muted">—</span>'}</div>`}</td>
+      <td class="outbound-phone">${safeTel(row.phone) ? `<a href="${escapeHtml(safeTel(row.phone))}">${escapeHtml(formatPhoneNumber(row.phone))}</a>` : `<div data-outbound-lookup="${row.id}">${outboundPhoneLookup(row)}</div>`}</td>
       <td><div class="outbound-stage-controls"><select data-outbound-status="${row.id}" class="outbound-status status-${row.status}" aria-label="Status for ${escapeHtml(row.name)}">${options(row.status)}</select><select data-outbound-method="${row.id}" class="outbound-method" aria-label="Contact method for ${escapeHtml(row.name)}" title="Method used to contact this prospect">${methodOptions(row.contact_method || "")}</select><select data-outbound-touchpoint="${row.id}" class="outbound-method" aria-label="Add touchpoint for ${escapeHtml(row.name)}"><option value="">+ Touchpoint</option>${methodOptions(null).replace(/<option value=""[^>]*>.*?<\/option>/, "")}</select></div>
         ${row.contacted_at ? `<small>Contacted ${escapeHtml(absoluteDate(row.contacted_at))}</small>` : ""}
         <div class="outbound-touchpoints">${(row.touchpoints || []).map(touch => `<small>${escapeHtml((data.contact_methods || {})[touch.contact_method] || touch.contact_method)} · ${escapeHtml(absoluteDate(touch.contacted_at))}</small>`).join("")}</div></td>
@@ -8081,8 +8141,7 @@ let spendSyncing = false;
 
 function spendMoney(value) {
   if (value == null) return "—";
-  const dollars = Number(value) / 1000000;
-  return new Intl.NumberFormat("en-US", {style:"currency", currency:"USD"}).format(dollars);
+  return money(Number(value) / 1_000_000);
 }
 
 function spendShell() {
@@ -8218,10 +8277,11 @@ async function setView(name, { preserveSearch = false } = {}) {
     if (window.location.hash === "#intelligence") {
       window.history.replaceState(null, "", "#smart_scan");
     }
-    const dialog = $("#smart-scan-options-dialog");
-    if (!dialog?.open) $("#scan-launch-trigger")?.click();
+    state.openSmartScanWhenReady = true;
+    renderScanLauncherStatus();
     return;
   }
+  if (name !== "smart_scan") state.openSmartScanWhenReady = false;
   if (["sales", "pipeline", "accounts", "overview"].includes(name)) {
     setSalesMode(["pipeline", "accounts"].includes(name) ? "pipeline" : "prospects");
     name = "sales";
